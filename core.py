@@ -209,7 +209,7 @@ class UltraGPT:
         # add message before system message
         processed = []
         for message in messages:
-            if message["role"] == "system":
+            if message["role"] == "system" or message["role"] == "developer":
                 processed.append(new_message)
             processed.append(message)
         return processed
@@ -218,9 +218,9 @@ class UltraGPT:
         # add message after system message
         processed = []
         for message in messages:
-            if message["role"] == "system":
+            if message["role"] == "system" or message["role"] == "developer":
                 processed.append({
-                    "role": "system",
+                    "role": message["role"],
                     "content": f"{message['content']}\n{new_message}"
                 })
             else:

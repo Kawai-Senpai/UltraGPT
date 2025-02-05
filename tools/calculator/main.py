@@ -5,7 +5,7 @@ _info = "This allows you to perform mathematic calculations."
 
 def extract_system_message(history):
     for message in history:
-        if message["role"] == "system":
+        if message["role"] == "system" or message["role"] == "developer":
             return message["content"]
 
 def _execute(message, history, client, config):
