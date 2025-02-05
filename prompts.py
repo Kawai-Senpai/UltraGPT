@@ -109,3 +109,28 @@ def combine_all_pipeline_prompts(reasons, conclusion):
 """ if conclusion else ""
 
     return f"Here is the thought process and reasoning that have been gone through, so far. This might help you to come up with a proper answer:" + reasons_prompt + conclusion_prompt
+
+def make_tool_analysis_prompt(message: str, available_tools: list) -> str:
+    """Format prompt for tool analysis"""
+    tools_str = str(available_tools)
+    example = """Your output should look like this (example):
+{
+    "tools": ["web-search", "tool_name2"]
+}"""
+    return f"""This is a user message. Analyze if this user message requires any tools. Available tools: {tools_str}
+
+Message: "{message}"
+
+{example}
+
+Rules:
+- Only include the tool names under "tools" that are needed to respond to the message.
+- If no tools are needed, return empty array. You can use multiple tools if needed.
+- Only use tools that are available to you. Do not use any other tools.
+- It is not necessary to use a tool for every message. Only use a tool if it is truly needed.
+- Your output should be in parsable proper JSON format like the given example.
+"""
+
+def format_tool_response(tool_response: str) -> str:
+    """Format tool response for inclusion in context"""
+    return f"\n\nTool response: {tool_response}" if tool_response else ""

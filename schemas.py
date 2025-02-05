@@ -1,7 +1,11 @@
 from pydantic import BaseModel
+from typing import List
 
 class Steps(BaseModel):
-    steps: list[str]
+    steps: List[str]
 
 class Reasoning(BaseModel):
-    thoughts: list[str]
+    thoughts: List[str]
+
+class ToolAnalysisSchema(BaseModel):
+    tools: List[str]

@@ -1,9 +1,18 @@
 from openai import OpenAI 
-from prompts import generate_steps_prompt, each_step_prompt, generate_reasoning_prompt, generate_conclusion_prompt, combine_all_pipeline_prompts
+import ultraprint.common as p
+from prompts import (
+generate_steps_prompt, 
+each_step_prompt, generate_reasoning_prompt, 
+generate_conclusion_prompt, combine_all_pipeline_prompts,
+make_tool_analysis_prompt
+)
 from pydantic import BaseModel
 from schemas import Steps, Reasoning
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from ultraprint.logging import logger
+from schemas import ToolAnalysisSchema
+from tools.web_search.main import _execute as web_search
+from itertools import islice
 
 class UltraGPT:
     
@@ -20,7 +29,16 @@ class UltraGPT:
         logger_filename: str = 'debug/ultragpt.log',
         log_extra_info: bool = False,
         log_to_file: bool = False,
-        log_level: str = 'DEBUG'
+        log_level: str = 'DEBUG',
+        tools: list = ["web-search"],
+        tools_config: dict = {
+            "web-search": {
+                "max_results": 5,
+                "model": "gpt-4o"
+            }
+        },
+        tool_batch_size: int = 3,  # New parameter for controlling batch size
+        tool_max_workers: int = 10, # New parameter for controlling max workers
     ):
         # Create the OpenAI client using the provided API key
         self.openai_client = OpenAI(api_key=api_key)
@@ -29,7 +47,12 @@ class UltraGPT:
         self.reasoning_iterations = reasoning_iterations
         self.steps_pipeline = steps_pipeline
         self.reasoning_pipeline = reasoning_pipeline
+        self.tools = tools
+        self.tools_config = tools_config
+        self.tool_batch_size = tool_batch_size
+        self.tool_max_workers = tool_max_workers
         
+        self.verbose = verbose
         self.log = logger(
             name=logger_name,
             filename=logger_filename,
@@ -38,11 +61,20 @@ class UltraGPT:
             log_level=log_level,
             log_to_console=verbose
         )
-        self.log.info(f"Initializing UltraGPT with model: {self.model}")
+        if self.verbose:
+            p.blue("="*50)
+            p.blue("Initializing UltraGPT")
+            p.cyan(f"Model: {self.model}")
+            p.blue("="*50)
+        else:
+            self.log.info("Initializing UltraGPT with model: %s", self.model)
 
     def chat_with_openai_sync(self, messages: list):
         try:
-            self.log.debug(f"Sending sync request to OpenAI with {len(messages)} messages")
+            if self.verbose:
+                p.cyan(f"OpenAI Request → Messages: {len(messages)}")
+            else:
+                self.log.debug("Sending request to OpenAI (msgs: %d)", len(messages))
             response = self.openai_client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -51,15 +83,19 @@ class UltraGPT:
             )
             content = response.choices[0].message.content.strip()
             tokens = response.usage.total_tokens
-            self.log.debug(f"Received response with {tokens} tokens")
+            if self.verbose:
+                p.green(f"✓ Response received ({tokens} tokens)")
+            else:
+                self.log.debug("Response received (tokens: %d)", tokens)
             return content, tokens
         except Exception as e:
-            self.log.error(f"Error in chat_with_openai_sync: {str(e)}")
+            p.red(f"✗ OpenAI request failed: {str(e)}")
             raise e
 
     def chat_with_model_parse(self, messages: list, schema=None):
         try:
-            self.log.debug(f"Sending parse request to OpenAI with schema: {schema}")
+            self.log.debug("Sending parse request with schema: %s", schema)
+            
             response = self.openai_client.beta.chat.completions.parse(
                 model=self.model,
                 messages=messages,
@@ -70,11 +106,20 @@ class UltraGPT:
             if isinstance(content, BaseModel):
                 content = content.model_dump(by_alias=True)
             tokens = response.usage.total_tokens
-            self.log.debug(f"Received response with {tokens} tokens")
+            
+            self.log.debug("Parse response received (tokens: %d)", tokens)
             return content, tokens
         except Exception as e:
-            self.log.error(f"Error in chat_with_model_parse: {str(e)}")
+            self.log.error("Parse request failed: %s", str(e))
             raise e
+
+    def analyze_tool_need(self, message: str, available_tools: list) -> dict:
+        """Analyze if a tool is needed for the message"""
+        prompt = make_tool_analysis_prompt(message, available_tools)
+        response = self.chat_with_model_parse([{"role": "system", "content": prompt}], schema=ToolAnalysisSchema)
+        if not response:
+            return {"tools": []}
+        return response
 
     def turnoff_system_message(self, messages: list):
         # set system message to user message
@@ -95,7 +140,10 @@ class UltraGPT:
         return processed
 
     def run_steps_pipeline(self, messages: list):
-        self.log.info("Starting steps pipeline")
+        if self.verbose:
+            p.purple("➤ Starting Steps Pipeline")
+        else:
+            self.log.info("Starting steps pipeline")
         total_tokens = 0
 
         messages = self.turnoff_system_message(messages)
@@ -104,15 +152,23 @@ class UltraGPT:
         steps_json, tokens = self.chat_with_model_parse(steps_generator_message, schema=Steps)
         total_tokens += tokens
         steps = steps_json.get("steps", [])
-        self.log.debug(f"Steps: {steps}")
+        if self.verbose:
+            p.yellow(f"Generated {len(steps)} steps:")
+            for idx, step in enumerate(steps, 1):
+                p.lgray(f"  {idx}. {step}")
+        else:
+            self.log.debug("Generated %d steps", len(steps))
 
         memory = []
 
-        for step in steps:
+        for idx, step in enumerate(steps, 1):
+            if self.verbose:
+                p.cyan(f"Processing step {idx}/{len(steps)}")
+            self.log.debug("Processing step %d/%d", idx, len(steps))
             step_prompt = each_step_prompt(memory, step)
             step_message = messages + [{"role": "system", "content": step_prompt}]
             step_response, tokens = self.chat_with_openai_sync(step_message)
-            self.log.debug(f"Step: {step}, Response: {step_response}")
+            self.log.debug("Step %d response: %s...", idx, step_response[:100])
             total_tokens += tokens
             memory.append(
                 {
@@ -127,7 +183,8 @@ class UltraGPT:
         conclusion, tokens = self.chat_with_openai_sync(conclusion_message)
         total_tokens += tokens
 
-        self.log.debug(f"Final Conclusion: {conclusion}")
+        if self.verbose:
+            p.green("✓ Steps pipeline completed")
         
         return {
             "steps": memory,
@@ -135,12 +192,18 @@ class UltraGPT:
         }, total_tokens
 
     def run_reasoning_pipeline(self, messages: list):
-        self.log.info(f"Starting reasoning pipeline with {self.reasoning_iterations} iterations")
+        if self.verbose:
+            p.purple(f"➤ Starting Reasoning Pipeline ({self.reasoning_iterations} iterations)")
+        else:
+            self.log.info("Starting reasoning pipeline (%d iterations)", self.reasoning_iterations)
         total_tokens = 0
         all_thoughts = []
         messages = self.turnoff_system_message(messages)
 
         for iteration in range(self.reasoning_iterations):
+            if self.verbose:
+                p.yellow(f"Iteration {iteration + 1}/{self.reasoning_iterations}")
+            self.log.debug("Iteration %d/%d", iteration + 1, self.reasoning_iterations)
             # Generate new thoughts based on all previous thoughts
             reasoning_message = messages + [
                 {"role": "system", "content": generate_reasoning_prompt(all_thoughts)}
@@ -155,12 +218,24 @@ class UltraGPT:
             new_thoughts = reasoning_json.get("thoughts", [])
             all_thoughts.extend(new_thoughts)
             
-            self.log.debug(f"Iteration {iteration + 1} thoughts: {new_thoughts}")
+            if self.verbose:
+                p.cyan(f"Generated {len(new_thoughts)} thoughts:")
+                for idx, thought in enumerate(new_thoughts, 1):
+                    p.lgray(f"  {idx}. {thought}")
+            else:
+                self.log.debug("Generated %d new thoughts", len(new_thoughts))
 
         return all_thoughts, total_tokens
 
     def chat(self, messages: list, schema=None):
-        self.log.info(f"Starting chat with {len(messages)} messages")
+        if self.verbose:
+            p.blue("="*50)
+            p.blue("Starting Chat Session")
+            p.cyan(f"Messages: {len(messages)}")
+            p.cyan(f"Schema: {schema}")
+            p.blue("="*50)
+        else:
+            self.log.info("Starting chat session")
         reasoning_output = []
         reasoning_tokens = 0
         steps_output = {"steps": [], "conclusion": ""}
@@ -210,6 +285,75 @@ class UltraGPT:
             "final_tokens": tokens
         }
         total_tokens = reasoning_tokens + steps_tokens + tokens
-        self.log.info(f"Chat completed with total tokens: {total_tokens}")
+        if self.verbose:
+            p.blue("="*50)
+            p.green("✓ Chat Session Completed")
+            p.yellow("Tokens Used:")
+            p.lgray(f"  - Reasoning: {reasoning_tokens}")
+            p.lgray(f"  - Steps: {steps_tokens}")
+            p.lgray(f"  - Final: {tokens}")
+            p.lgray(f"  - Total: {total_tokens}")
+            p.blue("="*50)
+        else:
+            self.log.info("Chat completed (total tokens: %d)", total_tokens)
         return final_output, total_tokens, details_dict
 
+    #! Tools ----------------------------------------------------------------
+    def execute_tool(self, tool: str, message: str, history: list) -> dict:
+        """Execute a single tool and return its response"""
+        if tool == "web-search":
+            response = web_search(
+                message, 
+                history, 
+                self.openai_client, 
+                self.tools_config.get("web-search", {})
+            )
+            return {
+                "tool": tool,
+                "response": response
+            }
+        # Add other tool conditions here
+        return None
+
+    def batch_tools(self, tools: list, batch_size: int):
+        """Helper function to create batches of tools"""
+        iterator = iter(tools)
+        while batch := list(islice(iterator, batch_size)):
+            yield batch
+
+    def execute_tools(self, message: str, history: list) -> list:
+        total_tools = len(self.tools)
+        if self.verbose:
+            p.purple(f"➤ Executing {total_tools} tools in batches of {self.tool_batch_size}")
+        else:
+            self.log.info("Executing %d tools in batches of %d", total_tools, self.tool_batch_size)
+        
+        all_responses = []
+        for batch_idx, tool_batch in enumerate(self.batch_tools(self.tools, self.tool_batch_size), 1):
+            if self.verbose:
+                p.yellow(f"Batch {batch_idx}")
+            batch_responses = []
+            
+            with ThreadPoolExecutor(max_workers=min(len(tool_batch), self.tool_max_workers)) as executor:
+                future_to_tool = {
+                    executor.submit(self.execute_tool, tool, message, history): tool 
+                    for tool in tool_batch
+                }
+                
+                for future in as_completed(future_to_tool):
+                    tool = future_to_tool[future]
+                    try:
+                        result = future.result()
+                        if result:
+                            batch_responses.append(result)
+                    except Exception as e:
+                        self.log.error("Tool %s failed: %s", tool, str(e))
+            
+            all_responses.extend(batch_responses)
+            if self.verbose:
+                p.green(f"✓ Batch {batch_idx}: {len(batch_responses)}/{len(tool_batch)} tools completed")
+            else:
+                self.log.debug("Batch %d: %d/%d tools completed", 
+                        batch_idx, len(batch_responses), len(tool_batch))
+                    
+        return all_responses
