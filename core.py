@@ -22,70 +22,29 @@ class UltraGPT:
     def __init__(
         self, 
         api_key: str, 
-        model: str = None, 
-        temperature: float = 0.7, 
-        reasoning_iterations: int = 3,
-        steps_pipeline: bool = True,
-        reasoning_pipeline: bool = True,
         verbose: bool = False,
         logger_name: str = 'ultragpt',
         logger_filename: str = 'debug/ultragpt.log',
         log_extra_info: bool = False,
         log_to_file: bool = False,
         log_level: str = 'DEBUG',
-        tools: list = ["web-search", "calculator"],
-        tools_config: dict = {
-            "web-search": {
-                "max_results": 1,
-                "model": "gpt-4o"
-            },
-            "calculator": {
-                "model": "gpt-4o"
-            }
-        },
-        tool_batch_size: int = 3,  # New parameter for controlling batch size
-        tool_max_workers: int = 10, # New parameter for controlling max workers
     ):
         """
         Initialize the UltraGPT class.
         Args:
             api_key (str): The API key for accessing the OpenAI service.
-            model (str, optional): The model to use. Defaults to "gpt-4o".
-            temperature (float, optional): The temperature for the model's output. Defaults to 0.7.
-            reasoning_iterations (int, optional): The number of reasoning iterations. Defaults to 3.
-            steps_pipeline (bool, optional): Whether to use steps pipeline. Defaults to True.
-            reasoning_pipeline (bool, optional): Whether to use reasoning pipeline. Defaults to True.
             verbose (bool, optional): Whether to enable verbose logging. Defaults to False.
             logger_name (str, optional): The name of the logger. Defaults to 'ultragpt'.
             logger_filename (str, optional): The filename for the logger. Defaults to 'debug/ultragpt.log'.
             log_extra_info (bool, optional): Whether to include extra info in logs. Defaults to False.
             log_to_file (bool, optional): Whether to log to a file. Defaults to False.
             log_level (str, optional): The logging level. Defaults to 'DEBUG'.
-            tools (list, optional): The list of tools to enable. Defaults to ["web-search", "calculator"].
-            tools_config (dict, optional): The configuration for the tools. Defaults to predefined configurations.
-            tool_batch_size (int, optional): The batch size for tool processing. Defaults to 3.
-            tool_max_workers (int, optional): The maximum number of workers for tool processing. Defaults to 10.
         Raises:
             ValueError: If an invalid tool is provided.
         """
 
         # Create the OpenAI client using the provided API key
         self.openai_client = OpenAI(api_key=api_key)
-        self.model = model or "gpt-4o"
-        self.temperature = temperature
-        self.reasoning_iterations = reasoning_iterations
-        self.steps_pipeline = steps_pipeline
-        self.reasoning_pipeline = reasoning_pipeline
-        self.tools = tools
-        self.tools_config = tools_config
-        self.tool_batch_size = tool_batch_size
-        self.tool_max_workers = tool_max_workers
-        
-        supported_tools = ["web-search", "calculator"]
-        for tool in tools:
-            if tool not in supported_tools:
-                raise ValueError(f"Invalid tool: {tools}. Supported tools: {', '.join(supported_tools)}")
-
         self.verbose = verbose
         self.log = logger(
             name=logger_name,
@@ -96,20 +55,32 @@ class UltraGPT:
             log_to_console=False  # Always disable console logging
         )
         
-        self.log.info("Initializing UltraGPT with model: %s", self.model)
+        self.log.info("Initializing UltraGPT")
         if self.verbose:
             p.blue("="*50)
             p.blue("Initializing UltraGPT")
-            p.cyan(f"Model: {self.model}")
-            if tools:
-                p.cyan(f"Tools enabled: {', '.join(tools)}")
             p.blue("="*50)
 
-    def chat_with_openai_sync(self, messages: list):
+    def chat_with_openai_sync(
+        self,
+        messages: list,
+        model: str,
+        temperature: float,
+        tools: list,
+        tools_config: dict,
+        tool_batch_size: int,
+        tool_max_workers: int
+    ):
         """
         Sends a synchronous chat request to OpenAI and processes the response.
         Args:
             messages (list): A list of message dictionaries to be sent to OpenAI.
+            model (str): The model to use.
+            temperature (float): The temperature for the model's output.
+            tools (list): The list of tools to enable.
+            tools_config (dict): The configuration for the tools.
+            tool_batch_size (int): The batch size for tool processing.
+            tool_max_workers (int): The maximum number of workers for tool processing.
         Returns:
             tuple: A tuple containing the response content (str) and the total number of tokens used (int).
         Raises:
@@ -124,7 +95,7 @@ class UltraGPT:
                 p.cyan(f"\nOpenAI Request → Messages: {len(messages)}")
                 p.yellow("Checking for tool needs...")
             
-            tool_response = self.execute_tools(messages[-1]["content"], messages)
+            tool_response = self.execute_tools(message_content=messages[-1]["content"], history=messages, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
             if tool_response:
                 if self.verbose:
                     p.cyan("\nAppending tool responses to message")
@@ -134,10 +105,10 @@ class UltraGPT:
                 p.dgray("\nNo tool responses needed")
             
             response = self.openai_client.chat.completions.create(
-                model=self.model,
+                model=model,
                 messages=messages,
                 stream=False,
-                temperature=self.temperature
+                temperature=temperature
             )
             content = response.choices[0].message.content.strip()
             tokens = response.usage.total_tokens
@@ -151,12 +122,28 @@ class UltraGPT:
                 p.red(f"✗ OpenAI request failed: {str(e)}")
             raise e
 
-    def chat_with_model_parse(self, messages: list, schema=None):
+    def chat_with_model_parse(
+        self,
+        messages: list,
+        schema=None,
+        model: str = "gpt-4o",
+        temperature: float = 0.7,
+        tools: list = [],
+        tools_config: dict = {},
+        tool_batch_size: int = 3,
+        tool_max_workers: int = 10
+    ):
         """
         Sends a chat message to the model for parsing and returns the parsed response.
         Args:
             messages (list): A list of message dictionaries to be sent to the model.
             schema (optional): The schema to be used for parsing the response. Defaults to None.
+            model (str): The model to use.
+            temperature (float): The temperature for the model's output.
+            tools (list): The list of tools to enable.
+            tools_config (dict): The configuration for the tools.
+            tool_batch_size (int): The batch size for tool processing.
+            tool_max_workers (int): The maximum number of workers for tool processing.
         Returns:
             tuple: A tuple containing the parsed content and the total number of tokens used.
         Raises:
@@ -165,16 +152,16 @@ class UltraGPT:
         try:
             self.log.debug("Sending parse request with schema: %s", schema)
             
-            tool_response = self.execute_tools(messages[-1]["content"], messages)
+            tool_response = self.execute_tools(message_content=messages[-1]["content"], history=messages, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
             if tool_response:
                 tool_response = "Tool Responses:\n" + tool_response
             messages = self.append_message_to_system(messages, tool_response)
 
             response = self.openai_client.beta.chat.completions.parse(
-                model=self.model,
+                model=model,
                 messages=messages,
                 response_format=schema,
-                temperature=self.temperature
+                temperature=temperature
             )
             content = response.choices[0].message.parsed
             if isinstance(content, BaseModel):
@@ -228,7 +215,16 @@ class UltraGPT:
         return processed
     
     #! Pipelines -----------------------------------------------------------
-    def run_steps_pipeline(self, messages: list):
+    def run_steps_pipeline(
+        self,
+        messages: list,
+        model: str,
+        temperature: float,
+        tools: list,
+        tools_config: dict,
+        tool_batch_size: int,
+        tool_max_workers: int
+    ):
         if self.verbose:
             p.purple("➤ Starting Steps Pipeline")
         else:
@@ -238,7 +234,7 @@ class UltraGPT:
         messages = self.turnoff_system_message(messages)
         steps_generator_message = messages + [{"role": "system", "content": generate_steps_prompt()}]
 
-        steps_json, tokens = self.chat_with_model_parse(steps_generator_message, schema=Steps)
+        steps_json, tokens = self.chat_with_model_parse(steps_generator_message, schema=Steps, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
         total_tokens += tokens
         steps = steps_json.get("steps", [])
         if self.verbose:
@@ -256,7 +252,7 @@ class UltraGPT:
             self.log.debug("Processing step %d/%d", idx, len(steps))
             step_prompt = each_step_prompt(memory, step)
             step_message = messages + [{"role": "system", "content": step_prompt}]
-            step_response, tokens = self.chat_with_openai_sync(step_message)
+            step_response, tokens = self.chat_with_openai_sync(step_message, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
             self.log.debug("Step %d response: %s...", idx, step_response[:100])
             total_tokens += tokens
             memory.append(
@@ -269,7 +265,7 @@ class UltraGPT:
         # Generate final conclusion
         conclusion_prompt = generate_conclusion_prompt(memory)
         conclusion_message = messages + [{"role": "system", "content": conclusion_prompt}]
-        conclusion, tokens = self.chat_with_openai_sync(conclusion_message)
+        conclusion, tokens = self.chat_with_openai_sync(conclusion_message, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
         total_tokens += tokens
 
         if self.verbose:
@@ -280,19 +276,29 @@ class UltraGPT:
             "conclusion": conclusion
         }, total_tokens
 
-    def run_reasoning_pipeline(self, messages: list):
+    def run_reasoning_pipeline(
+        self,
+        messages: list,
+        model: str,
+        temperature: float,
+        reasoning_iterations: int,
+        tools: list,
+        tools_config: dict,
+        tool_batch_size: int,
+        tool_max_workers: int
+    ):
         if self.verbose:
-            p.purple(f"➤ Starting Reasoning Pipeline ({self.reasoning_iterations} iterations)")
+            p.purple(f"➤ Starting Reasoning Pipeline ({reasoning_iterations} iterations)")
         else:
-            self.log.info("Starting reasoning pipeline (%d iterations)", self.reasoning_iterations)
+            self.log.info("Starting reasoning pipeline (%d iterations)", reasoning_iterations)
         total_tokens = 0
         all_thoughts = []
         messages = self.turnoff_system_message(messages)
 
-        for iteration in range(self.reasoning_iterations):
+        for iteration in range(reasoning_iterations):
             if self.verbose:
-                p.yellow(f"Iteration {iteration + 1}/{self.reasoning_iterations}")
-            self.log.debug("Iteration %d/%d", iteration + 1, self.reasoning_iterations)
+                p.yellow(f"Iteration {iteration + 1}/{reasoning_iterations}")
+            self.log.debug("Iteration %d/%d", iteration + 1, reasoning_iterations)
             # Generate new thoughts based on all previous thoughts
             reasoning_message = messages + [
                 {"role": "system", "content": generate_reasoning_prompt(all_thoughts)}
@@ -300,7 +306,13 @@ class UltraGPT:
             
             reasoning_json, tokens = self.chat_with_model_parse(
                 reasoning_message, 
-                schema=Reasoning
+                schema=Reasoning,
+                model=model,
+                temperature=temperature,
+                tools=tools,
+                tools_config=tools_config,
+                tool_batch_size=tool_batch_size,
+                tool_max_workers=tool_max_workers
             )
             total_tokens += tokens
             
@@ -317,111 +329,118 @@ class UltraGPT:
         return all_thoughts, total_tokens
     
     #! Main Chat Function ---------------------------------------------------
-    def chat(self, messages: list, schema=None, override_tools: list = None, override_model: str = None):
+    def chat(
+        self,
+        messages: list,
+        schema=None,
+        model: str = "gpt-4o",
+        temperature: float = 0.7,
+        reasoning_iterations: int = 3,
+        steps_pipeline: bool = True,
+        reasoning_pipeline: bool = True,
+        tools: list = ["web-search", "calculator"],
+        tools_config: dict = {
+            "web-search": {"max_results": 1, "model": "gpt-4o"},
+            "calculator": {"model": "gpt-4o"}
+        },
+        tool_batch_size: int = 3,
+        tool_max_workers: int = 10,
+    ):
         """
         Initiates a chat session with the given messages and optional schema.
         Args:
             messages (list): A list of message dictionaries to be processed.
             schema (optional): A schema to parse the final output, defaults to None.
-            override_tools (list, optional): Temporarily override the enabled tools for this chat.
-            override_model (str, optional): Temporarily override the model for this chat.
+            model (str, optional): The model to use. Defaults to "gpt-4o".
+            temperature (float, optional): The temperature for the model's output. Defaults to 0.7.
+            reasoning_iterations (int, optional): The number of reasoning iterations. Defaults to 3.
+            steps_pipeline (bool, optional): Whether to use steps pipeline. Defaults to True.
+            reasoning_pipeline (bool, optional): Whether to use reasoning pipeline. Defaults to True.
+            tools (list, optional): The list of tools to enable. Defaults to ["web-search", "calculator"].
+            tools_config (dict, optional): The configuration for the tools. Defaults to predefined configurations.
+            tool_batch_size (int, optional): The batch size for tool processing. Defaults to 3.
+            tool_max_workers (int, optional): The maximum number of workers for tool processing. Defaults to 10.
         Returns:
             tuple: A tuple containing the final output, total tokens used, and a details dictionary.
                 - final_output: The final response from the chat model.
                 - total_tokens (int): The total number of tokens used during the session.
                 - details_dict (dict): A dictionary with detailed information about the session.
         """
-        # Save original settings
-        original_tools = self.tools
-        original_model = self.model
+        if self.verbose:
+            p.blue("="*50)
+            p.blue("Starting Chat Session")
+            p.cyan(f"Messages: {len(messages)}")
+            p.cyan(f"Schema: {schema}")
+            p.cyan(f"Model: {model}")
+            p.cyan(f"Tools: {', '.join(tools) if tools else 'None'}")
+            p.blue("="*50)
+        else:
+            self.log.info("Starting chat session")
 
-        try:
-            # Override settings if provided
-            if override_tools is not None:
-                self.tools = override_tools
-            if override_model is not None:
-                self.model = override_model
+        reasoning_output = []
+        reasoning_tokens = 0
+        steps_output = {"steps": [], "conclusion": ""}
+        steps_tokens = 0
 
-            if self.verbose:
-                p.blue("="*50)
-                p.blue("Starting Chat Session")
-                p.cyan(f"Messages: {len(messages)}")
-                p.cyan(f"Schema: {schema}")
-                p.cyan(f"Model: {self.model}")
-                p.cyan(f"Tools: {', '.join(self.tools) if self.tools else 'None'}")
-                p.blue("="*50)
-            else:
-                self.log.info("Starting chat session")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = []
+            
+            if reasoning_pipeline:
+                futures.append({
+                    "type": "reasoning",
+                    "future": executor.submit(self.run_reasoning_pipeline, messages, model, temperature, reasoning_iterations, tools, tools_config, tool_batch_size, tool_max_workers)
+                })
+            
+            if steps_pipeline:
+                futures.append({
+                    "type": "steps",
+                    "future": executor.submit(self.run_steps_pipeline, messages, model, temperature, tools, tools_config, tool_batch_size, tool_max_workers)
+                })
 
-            reasoning_output = []
-            reasoning_tokens = 0
-            steps_output = {"steps": [], "conclusion": ""}
-            steps_tokens = 0
+            for future in futures:
+                if future["type"] == "reasoning":
+                    reasoning_output, reasoning_tokens = future["future"].result()
+                elif future["type"] == "steps":
+                    steps_output, steps_tokens = future["future"].result()
 
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = []
-                
-                if self.reasoning_pipeline:
-                    futures.append({
-                        "type": "reasoning",
-                        "future": executor.submit(self.run_reasoning_pipeline, messages)
-                    })
-                
-                if self.steps_pipeline:
-                    futures.append({
-                        "type": "steps",
-                        "future": executor.submit(self.run_steps_pipeline, messages)
-                    })
+        conclusion = steps_output.get("conclusion", "")
+        steps = steps_output.get("steps", [])
 
-                for future in futures:
-                    if future["type"] == "reasoning":
-                        reasoning_output, reasoning_tokens = future["future"].result()
-                    elif future["type"] == "steps":
-                        steps_output, steps_tokens = future["future"].result()
+        if reasoning_pipeline or steps_pipeline:
+            prompt = combine_all_pipeline_prompts(reasoning_output, conclusion)
+            messages = self.add_message_before_system(messages, {"role": "user", "content": prompt})
 
-            conclusion = steps_output.get("conclusion", "")
-            steps = steps_output.get("steps", [])
+        if schema:
+            final_output, tokens = self.chat_with_model_parse(messages, schema=schema, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+        else:
+            final_output, tokens = self.chat_with_openai_sync(messages, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
 
-            if self.reasoning_pipeline or self.steps_pipeline:
-                prompt = combine_all_pipeline_prompts(reasoning_output, conclusion)
-                messages = self.add_message_before_system(messages, {"role": "user", "content": prompt})
-
-            if schema:
-                final_output, tokens = self.chat_with_model_parse(messages, schema=schema)
-            else:
-                final_output, tokens = self.chat_with_openai_sync(messages)
-
-            if steps:
-                steps.append(conclusion)
-                
-            details_dict = {
-                "reasoning": reasoning_output,
-                "steps": steps,
-                "reasoning_tokens": reasoning_tokens,
-                "steps_tokens": steps_tokens,
-                "final_tokens": tokens
-            }
-            total_tokens = reasoning_tokens + steps_tokens + tokens
-            if self.verbose:
-                p.blue("="*50)
-                p.green("✓ Chat Session Completed")
-                p.yellow("Tokens Used:")
-                p.lgray(f"  - Reasoning: {reasoning_tokens}")
-                p.lgray(f"  - Steps: {steps_tokens}")
-                p.lgray(f"  - Final: {tokens}")
-                p.lgray(f"  - Total: {total_tokens}")
-                p.blue("="*50)
-            else:
-                self.log.info("Chat completed (total tokens: %d)", total_tokens)
-            return final_output, total_tokens, details_dict
-
-        finally:
-            # Restore original settings
-            self.tools = original_tools
-            self.model = original_model
+        if steps:
+            steps.append(conclusion)
+            
+        details_dict = {
+            "reasoning": reasoning_output,
+            "steps": steps,
+            "reasoning_tokens": reasoning_tokens,
+            "steps_tokens": steps_tokens,
+            "final_tokens": tokens
+        }
+        total_tokens = reasoning_tokens + steps_tokens + tokens
+        if self.verbose:
+            p.blue("="*50)
+            p.green("✓ Chat Session Completed")
+            p.yellow("Tokens Used:")
+            p.lgray(f"  - Reasoning: {reasoning_tokens}")
+            p.lgray(f"  - Steps: {steps_tokens}")
+            p.lgray(f"  - Final: {tokens}")
+            p.lgray(f"  - Total: {total_tokens}")
+            p.blue("="*50)
+        else:
+            self.log.info("Chat completed (total tokens: %d)", total_tokens)
+        return final_output, total_tokens, details_dict
 
     #! Tools ----------------------------------------------------------------
-    def execute_tool(self, tool: str, message: str, history: list) -> dict:
+    def execute_tool(self, tool: str, message: str, history: list, tools_config: dict) -> dict:
         """Execute a single tool and return its response"""
         try:
             self.log.debug("Executing tool: %s", tool)
@@ -433,7 +452,7 @@ class UltraGPT:
                     message, 
                     history, 
                     self.openai_client, 
-                    self.tools_config.get("web-search", {})
+                    tools_config.get("web-search", {})
                 )
                 self.log.debug("Tool %s completed successfully", tool)
                 if self.verbose:
@@ -450,7 +469,7 @@ class UltraGPT:
                     message, 
                     history, 
                     self.openai_client, 
-                    self.tools_config.get("calculator", {})
+                    tools_config.get("calculator", {})
                 )
                 self.log.debug("Tool %s completed successfully", tool)
                 if self.verbose:
@@ -478,29 +497,37 @@ class UltraGPT:
         while batch := list(islice(iterator, batch_size)):
             yield batch
 
-    def execute_tools(self, message: str, history: list) -> str:
+    def execute_tools(
+        self,
+        message: str,
+        history: list,
+        tools: list,
+        tools_config: dict,
+        tool_batch_size: int,
+        tool_max_workers: int
+    ) -> str:
         """Execute tools and return formatted responses"""
-        if not self.tools:
+        if not tools:
             return ""
             
-        total_tools = len(self.tools)
-        self.log.info("Executing %d tools in batches of %d", total_tools, self.tool_batch_size)
+        total_tools = len(tools)
+        self.log.info("Executing %d tools in batches of %d", total_tools, tool_batch_size)
         if self.verbose:
-            p.purple(f"\n➤ Executing {total_tools} tools in batches of {self.tool_batch_size}")
+            p.purple(f"\n➤ Executing {total_tools} tools in batches of {tool_batch_size}")
             p.yellow("Query: " + message[:100] + "..." if len(message) > 100 else message)
             p.lgray("-" * 40)
         
         all_responses = []
         success_count = 0
         
-        for batch_idx, tool_batch in enumerate(self.batch_tools(self.tools, self.tool_batch_size), 1):
+        for batch_idx, tool_batch in enumerate(self.batch_tools(tools, tool_batch_size), 1):
             if self.verbose:
                 p.yellow(f"\nProcessing batch {batch_idx}...")
             batch_responses = []
             
-            with ThreadPoolExecutor(max_workers=min(len(tool_batch), self.tool_max_workers)) as executor:
+            with ThreadPoolExecutor(max_workers=min(len(tool_batch), tool_max_workers)) as executor:
                 future_to_tool = {
-                    executor.submit(self.execute_tool, tool, message, history): tool 
+                    executor.submit(self.execute_tool, tool, message, history, tools_config): tool 
                     for tool in tool_batch
                 }
                 
