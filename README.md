@@ -1,14 +1,6 @@
 # 🤖 UltraGPT
 
-<div align="center">
-
-[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](https://choosealicense.com/licenses/mit/)
-[![Python 3.6+](https://img.shields.io/badge/python-3.6+-blue.svg)](https://www.python.org/downloads/)
-[![OpenAI](https://img.shields.io/badge/OpenAI-API-lightgrey)](https://openai.com/)
-
 **A powerful and modular library for advanced GPT-based reasoning and step pipelines**
-
-</div>
 
 ## 🌟 Features
 
