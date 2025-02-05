@@ -18,7 +18,6 @@ from .tools.calculator.main import _execute as calculator
 from itertools import islice
 
 class UltraGPT:
-    
     def __init__(
         self, 
         api_key: str, 
