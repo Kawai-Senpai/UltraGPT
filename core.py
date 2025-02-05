@@ -1,19 +1,19 @@
 from openai import OpenAI 
 import ultraprint.common as p
-from prompts import (
+from .prompts import (
 generate_steps_prompt, 
 each_step_prompt, generate_reasoning_prompt, 
 generate_conclusion_prompt, combine_all_pipeline_prompts,
 make_tool_analysis_prompt
 )
 from pydantic import BaseModel
-from schemas import Steps, Reasoning
+from .schemas import Steps, Reasoning
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ultraprint.logging import logger
-from schemas import ToolAnalysisSchema
+from .schemas import ToolAnalysisSchema
 
-from tools.web_search.main import _execute as web_search
-from tools.calculator.main import _execute as calculator
+from .tools.web_search.main import _execute as web_search
+from .tools.calculator.main import _execute as calculator
 
 from itertools import islice
 
@@ -46,6 +46,29 @@ class UltraGPT:
         tool_batch_size: int = 3,  # New parameter for controlling batch size
         tool_max_workers: int = 10, # New parameter for controlling max workers
     ):
+        """
+        Initialize the UltraGPT class.
+        Args:
+            api_key (str): The API key for accessing the OpenAI service.
+            model (str, optional): The model to use. Defaults to "gpt-4o".
+            temperature (float, optional): The temperature for the model's output. Defaults to 0.7.
+            reasoning_iterations (int, optional): The number of reasoning iterations. Defaults to 3.
+            steps_pipeline (bool, optional): Whether to use steps pipeline. Defaults to True.
+            reasoning_pipeline (bool, optional): Whether to use reasoning pipeline. Defaults to True.
+            verbose (bool, optional): Whether to enable verbose logging. Defaults to False.
+            logger_name (str, optional): The name of the logger. Defaults to 'ultragpt'.
+            logger_filename (str, optional): The filename for the logger. Defaults to 'debug/ultragpt.log'.
+            log_extra_info (bool, optional): Whether to include extra info in logs. Defaults to False.
+            log_to_file (bool, optional): Whether to log to a file. Defaults to False.
+            log_level (str, optional): The logging level. Defaults to 'DEBUG'.
+            tools (list, optional): The list of tools to enable. Defaults to ["web-search", "calculator"].
+            tools_config (dict, optional): The configuration for the tools. Defaults to predefined configurations.
+            tool_batch_size (int, optional): The batch size for tool processing. Defaults to 3.
+            tool_max_workers (int, optional): The maximum number of workers for tool processing. Defaults to 10.
+        Raises:
+            ValueError: If an invalid tool is provided.
+        """
+
         # Create the OpenAI client using the provided API key
         self.openai_client = OpenAI(api_key=api_key)
         self.model = model or "gpt-4o"
@@ -83,6 +106,18 @@ class UltraGPT:
             p.blue("="*50)
 
     def chat_with_openai_sync(self, messages: list):
+        """
+        Sends a synchronous chat request to OpenAI and processes the response.
+        Args:
+            messages (list): A list of message dictionaries to be sent to OpenAI.
+        Returns:
+            tuple: A tuple containing the response content (str) and the total number of tokens used (int).
+        Raises:
+            Exception: If the request to OpenAI fails.
+        Logs:
+            Debug: Logs the number of messages sent, the number of tokens in the response, and any errors encountered.
+            Verbose: Optionally logs detailed steps of the request and response process.
+        """
         try:
             self.log.debug("Sending request to OpenAI (msgs: %d)", len(messages))
             if self.verbose:
@@ -117,6 +152,16 @@ class UltraGPT:
             raise e
 
     def chat_with_model_parse(self, messages: list, schema=None):
+        """
+        Sends a chat message to the model for parsing and returns the parsed response.
+        Args:
+            messages (list): A list of message dictionaries to be sent to the model.
+            schema (optional): The schema to be used for parsing the response. Defaults to None.
+        Returns:
+            tuple: A tuple containing the parsed content and the total number of tokens used.
+        Raises:
+            Exception: If the parse request fails.
+        """
         try:
             self.log.debug("Sending parse request with schema: %s", schema)
             
@@ -273,6 +318,22 @@ class UltraGPT:
     
     #! Main Chat Function ---------------------------------------------------
     def chat(self, messages: list, schema=None):
+        """
+        Initiates a chat session with the given messages and optional schema.
+        Args:
+            messages (list): A list of message dictionaries to be processed.
+            schema (optional): A schema to parse the final output, defaults to None.
+        Returns:
+            tuple: A tuple containing the final output, total tokens used, and a details dictionary.
+                - final_output: The final response from the chat model.
+                - total_tokens (int): The total number of tokens used during the session.
+                - details_dict (dict): A dictionary with detailed information about the session, including:
+                    - "reasoning": The output from the reasoning pipeline.
+                    - "steps": The steps and conclusion from the steps pipeline.
+                    - "reasoning_tokens": The number of tokens used by the reasoning pipeline.
+                    - "steps_tokens": The number of tokens used by the steps pipeline.
+                    - "final_tokens": The number of tokens used by the final chat model.
+        """
         if self.verbose:
             p.blue("="*50)
             p.blue("Starting Chat Session")

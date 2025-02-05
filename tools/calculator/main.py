@@ -11,4 +11,7 @@ def extract_system_message(history):
 def _execute(message, history, client, config):
     """Main function to execute the web search tool"""
     system_message = extract_system_message(history)
-    return calculate(message + "\n" + system_message, client, config)
+    if system_message == message:
+        return calculate(message, client, config)
+    else:
+        return calculate(message + "\n" + system_message, client, config)
