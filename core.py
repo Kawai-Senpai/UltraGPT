@@ -317,92 +317,108 @@ class UltraGPT:
         return all_thoughts, total_tokens
     
     #! Main Chat Function ---------------------------------------------------
-    def chat(self, messages: list, schema=None):
+    def chat(self, messages: list, schema=None, override_tools: list = None, override_model: str = None):
         """
         Initiates a chat session with the given messages and optional schema.
         Args:
             messages (list): A list of message dictionaries to be processed.
             schema (optional): A schema to parse the final output, defaults to None.
+            override_tools (list, optional): Temporarily override the enabled tools for this chat.
+            override_model (str, optional): Temporarily override the model for this chat.
         Returns:
             tuple: A tuple containing the final output, total tokens used, and a details dictionary.
                 - final_output: The final response from the chat model.
                 - total_tokens (int): The total number of tokens used during the session.
-                - details_dict (dict): A dictionary with detailed information about the session, including:
-                    - "reasoning": The output from the reasoning pipeline.
-                    - "steps": The steps and conclusion from the steps pipeline.
-                    - "reasoning_tokens": The number of tokens used by the reasoning pipeline.
-                    - "steps_tokens": The number of tokens used by the steps pipeline.
-                    - "final_tokens": The number of tokens used by the final chat model.
+                - details_dict (dict): A dictionary with detailed information about the session.
         """
-        if self.verbose:
-            p.blue("="*50)
-            p.blue("Starting Chat Session")
-            p.cyan(f"Messages: {len(messages)}")
-            p.cyan(f"Schema: {schema}")
-            p.blue("="*50)
-        else:
-            self.log.info("Starting chat session")
-        reasoning_output = []
-        reasoning_tokens = 0
-        steps_output = {"steps": [], "conclusion": ""}
-        steps_tokens = 0
+        # Save original settings
+        original_tools = self.tools
+        original_model = self.model
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = []
-            
-            if self.reasoning_pipeline:
-                futures.append({
-                    "type": "reasoning",
-                    "future": executor.submit(self.run_reasoning_pipeline, messages)
-                })
-            
-            if self.steps_pipeline:
-                futures.append({
-                    "type": "steps",
-                    "future": executor.submit(self.run_steps_pipeline, messages)
-                })
+        try:
+            # Override settings if provided
+            if override_tools is not None:
+                self.tools = override_tools
+            if override_model is not None:
+                self.model = override_model
 
-            for future in futures:
-                if future["type"] == "reasoning":
-                    reasoning_output, reasoning_tokens = future["future"].result()
-                elif future["type"] == "steps":
-                    steps_output, steps_tokens = future["future"].result()
+            if self.verbose:
+                p.blue("="*50)
+                p.blue("Starting Chat Session")
+                p.cyan(f"Messages: {len(messages)}")
+                p.cyan(f"Schema: {schema}")
+                p.cyan(f"Model: {self.model}")
+                p.cyan(f"Tools: {', '.join(self.tools) if self.tools else 'None'}")
+                p.blue("="*50)
+            else:
+                self.log.info("Starting chat session")
 
-        conclusion = steps_output.get("conclusion", "")
-        steps = steps_output.get("steps", [])
+            reasoning_output = []
+            reasoning_tokens = 0
+            steps_output = {"steps": [], "conclusion": ""}
+            steps_tokens = 0
 
-        if self.reasoning_pipeline or self.steps_pipeline:
-            prompt = combine_all_pipeline_prompts(reasoning_output, conclusion)
-            messages = self.add_message_before_system(messages, {"role": "user", "content": prompt})
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = []
+                
+                if self.reasoning_pipeline:
+                    futures.append({
+                        "type": "reasoning",
+                        "future": executor.submit(self.run_reasoning_pipeline, messages)
+                    })
+                
+                if self.steps_pipeline:
+                    futures.append({
+                        "type": "steps",
+                        "future": executor.submit(self.run_steps_pipeline, messages)
+                    })
 
-        if schema:
-            final_output, tokens = self.chat_with_model_parse(messages, schema=schema)
-        else:
-            final_output, tokens = self.chat_with_openai_sync(messages)
+                for future in futures:
+                    if future["type"] == "reasoning":
+                        reasoning_output, reasoning_tokens = future["future"].result()
+                    elif future["type"] == "steps":
+                        steps_output, steps_tokens = future["future"].result()
 
-        if steps:
-            steps.append(conclusion)
-            
-        details_dict = {
-            "reasoning": reasoning_output,
-            "steps": steps,
-            "reasoning_tokens": reasoning_tokens,
-            "steps_tokens": steps_tokens,
-            "final_tokens": tokens
-        }
-        total_tokens = reasoning_tokens + steps_tokens + tokens
-        if self.verbose:
-            p.blue("="*50)
-            p.green("✓ Chat Session Completed")
-            p.yellow("Tokens Used:")
-            p.lgray(f"  - Reasoning: {reasoning_tokens}")
-            p.lgray(f"  - Steps: {steps_tokens}")
-            p.lgray(f"  - Final: {tokens}")
-            p.lgray(f"  - Total: {total_tokens}")
-            p.blue("="*50)
-        else:
-            self.log.info("Chat completed (total tokens: %d)", total_tokens)
-        return final_output, total_tokens, details_dict
+            conclusion = steps_output.get("conclusion", "")
+            steps = steps_output.get("steps", [])
+
+            if self.reasoning_pipeline or self.steps_pipeline:
+                prompt = combine_all_pipeline_prompts(reasoning_output, conclusion)
+                messages = self.add_message_before_system(messages, {"role": "user", "content": prompt})
+
+            if schema:
+                final_output, tokens = self.chat_with_model_parse(messages, schema=schema)
+            else:
+                final_output, tokens = self.chat_with_openai_sync(messages)
+
+            if steps:
+                steps.append(conclusion)
+                
+            details_dict = {
+                "reasoning": reasoning_output,
+                "steps": steps,
+                "reasoning_tokens": reasoning_tokens,
+                "steps_tokens": steps_tokens,
+                "final_tokens": tokens
+            }
+            total_tokens = reasoning_tokens + steps_tokens + tokens
+            if self.verbose:
+                p.blue("="*50)
+                p.green("✓ Chat Session Completed")
+                p.yellow("Tokens Used:")
+                p.lgray(f"  - Reasoning: {reasoning_tokens}")
+                p.lgray(f"  - Steps: {steps_tokens}")
+                p.lgray(f"  - Final: {tokens}")
+                p.lgray(f"  - Total: {total_tokens}")
+                p.blue("="*50)
+            else:
+                self.log.info("Chat completed (total tokens: %d)", total_tokens)
+            return final_output, total_tokens, details_dict
+
+        finally:
+            # Restore original settings
+            self.tools = original_tools
+            self.model = original_model
 
     #! Tools ----------------------------------------------------------------
     def execute_tool(self, tool: str, message: str, history: list) -> dict:
