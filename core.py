@@ -94,7 +94,7 @@ class UltraGPT:
                 p.cyan(f"\nOpenAI Request → Messages: {len(messages)}")
                 p.yellow("Checking for tool needs...")
             
-            tool_response = self.execute_tools(message_content=messages[-1]["content"], history=messages, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+            tool_response = self.execute_tools(message=messages[-1]["content"], history=messages, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
             if tool_response:
                 if self.verbose:
                     p.cyan("\nAppending tool responses to message")
@@ -151,7 +151,7 @@ class UltraGPT:
         try:
             self.log.debug("Sending parse request with schema: %s", schema)
             
-            tool_response = self.execute_tools(message_content=messages[-1]["content"], history=messages, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+            tool_response = self.execute_tools(message=messages[-1]["content"], history=messages, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
             if tool_response:
                 tool_response = "Tool Responses:\n" + tool_response
             messages = self.append_message_to_system(messages, tool_response)
