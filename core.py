@@ -30,6 +30,7 @@ class UltraGPT:
         log_extra_info: bool = False,
         log_to_file: bool = False,
         log_level: str = 'DEBUG',
+        use_tools: bool = True,
         tools: list = ["web-search"],
         tools_config: dict = {
             "web-search": {
@@ -52,6 +53,10 @@ class UltraGPT:
         self.tool_batch_size = tool_batch_size
         self.tool_max_workers = tool_max_workers
         
+        supported_tools = ["web-search"]
+        if tools not in supported_tools:
+            raise ValueError(f"Invalid tool: {tools}. Supported tools: {', '.join(supported_tools)}")
+
         self.verbose = verbose
         self.log = logger(
             name=logger_name,
@@ -59,22 +64,34 @@ class UltraGPT:
             include_extra_info=log_extra_info,
             write_to_file=log_to_file,
             log_level=log_level,
-            log_to_console=verbose
+            log_to_console=False  # Always disable console logging
         )
+        
+        self.log.info("Initializing UltraGPT with model: %s", self.model)
         if self.verbose:
             p.blue("="*50)
             p.blue("Initializing UltraGPT")
             p.cyan(f"Model: {self.model}")
+            if tools:
+                p.cyan(f"Tools enabled: {', '.join(tools)}")
             p.blue("="*50)
-        else:
-            self.log.info("Initializing UltraGPT with model: %s", self.model)
 
     def chat_with_openai_sync(self, messages: list):
         try:
+            self.log.debug("Sending request to OpenAI (msgs: %d)", len(messages))
             if self.verbose:
-                p.cyan(f"OpenAI Request → Messages: {len(messages)}")
-            else:
-                self.log.debug("Sending request to OpenAI (msgs: %d)", len(messages))
+                p.cyan(f"\nOpenAI Request → Messages: {len(messages)}")
+                p.yellow("Checking for tool needs...")
+            
+            tool_response = self.execute_tools(messages[-1]["content"], messages)
+            if tool_response:
+                if self.verbose:
+                    p.cyan("\nAppending tool responses to message")
+                tool_response = "Tool Responses:\n" + tool_response
+                messages = self.append_message_to_system(messages, tool_response)
+            elif self.verbose:
+                p.dgray("\nNo tool responses needed")
+            
             response = self.openai_client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -83,19 +100,25 @@ class UltraGPT:
             )
             content = response.choices[0].message.content.strip()
             tokens = response.usage.total_tokens
+            self.log.debug("Response received (tokens: %d)", tokens)
             if self.verbose:
                 p.green(f"✓ Response received ({tokens} tokens)")
-            else:
-                self.log.debug("Response received (tokens: %d)", tokens)
             return content, tokens
         except Exception as e:
-            p.red(f"✗ OpenAI request failed: {str(e)}")
+            self.log.error("OpenAI sync request failed: %s", str(e))
+            if self.verbose:
+                p.red(f"✗ OpenAI request failed: {str(e)}")
             raise e
 
     def chat_with_model_parse(self, messages: list, schema=None):
         try:
             self.log.debug("Sending parse request with schema: %s", schema)
             
+            tool_response = self.execute_tools(messages[-1]["content"], messages)
+            if tool_response:
+                tool_response = "Tool Responses:\n" + tool_response
+            messages = self.append_message_to_system(messages, tool_response)
+
             response = self.openai_client.beta.chat.completions.parse(
                 model=self.model,
                 messages=messages,
@@ -121,6 +144,7 @@ class UltraGPT:
             return {"tools": []}
         return response
 
+    #! Message Alteration ---------------------------------------------------
     def turnoff_system_message(self, messages: list):
         # set system message to user message
         processed = []
@@ -139,6 +163,20 @@ class UltraGPT:
             processed.append(message)
         return processed
 
+    def append_message_to_system(self, messages: list, new_message: dict):
+        # add message after system message
+        processed = []
+        for message in messages:
+            if message["role"] == "system":
+                processed.append({
+                    "role": "system",
+                    "content": f"{message['content']}\n{new_message}"
+                })
+            else:
+                processed.append(message)
+        return processed
+    
+    #! Pipelines -----------------------------------------------------------
     def run_steps_pipeline(self, messages: list):
         if self.verbose:
             p.purple("➤ Starting Steps Pipeline")
@@ -226,7 +264,8 @@ class UltraGPT:
                 self.log.debug("Generated %d new thoughts", len(new_thoughts))
 
         return all_thoughts, total_tokens
-
+    
+    #! Main Chat Function ---------------------------------------------------
     def chat(self, messages: list, schema=None):
         if self.verbose:
             p.blue("="*50)
@@ -301,19 +340,37 @@ class UltraGPT:
     #! Tools ----------------------------------------------------------------
     def execute_tool(self, tool: str, message: str, history: list) -> dict:
         """Execute a single tool and return its response"""
-        if tool == "web-search":
-            response = web_search(
-                message, 
-                history, 
-                self.openai_client, 
-                self.tools_config.get("web-search", {})
-            )
-            return {
-                "tool": tool,
-                "response": response
-            }
-        # Add other tool conditions here
-        return None
+        try:
+            self.log.debug("Executing tool: %s", tool)
+            if self.verbose:
+                p.cyan(f"\nExecuting tool: {tool}")
+                
+            if tool == "web-search":
+                response = web_search(
+                    message, 
+                    history, 
+                    self.openai_client, 
+                    self.tools_config.get("web-search", {})
+                )
+                self.log.debug("Tool %s completed successfully", tool)
+                if self.verbose:
+                    p.green(f"✓ {tool} returned response:")
+                    p.lgray("-" * 40)
+                    p.lgray(response)
+                    p.lgray("-" * 40)
+                return {
+                    "tool": tool,
+                    "response": response
+                }
+            # Add other tool conditions here
+            if self.verbose:
+                p.yellow(f"! Tool {tool} not implemented")
+            return None
+        except Exception as e:
+            self.log.error("Tool %s failed: %s", tool, str(e))
+            if self.verbose:
+                p.red(f"\n✗ Tool {tool} failed: {str(e)}")
+            raise e
 
     def batch_tools(self, tools: list, batch_size: int):
         """Helper function to create batches of tools"""
@@ -321,17 +378,24 @@ class UltraGPT:
         while batch := list(islice(iterator, batch_size)):
             yield batch
 
-    def execute_tools(self, message: str, history: list) -> list:
+    def execute_tools(self, message: str, history: list) -> str:
+        """Execute tools and return formatted responses"""
+        if not self.tools:
+            return ""
+            
         total_tools = len(self.tools)
+        self.log.info("Executing %d tools in batches of %d", total_tools, self.tool_batch_size)
         if self.verbose:
-            p.purple(f"➤ Executing {total_tools} tools in batches of {self.tool_batch_size}")
-        else:
-            self.log.info("Executing %d tools in batches of %d", total_tools, self.tool_batch_size)
+            p.purple(f"\n➤ Executing {total_tools} tools in batches of {self.tool_batch_size}")
+            p.yellow("Query: " + message[:100] + "..." if len(message) > 100 else message)
+            p.lgray("-" * 40)
         
         all_responses = []
+        success_count = 0
+        
         for batch_idx, tool_batch in enumerate(self.batch_tools(self.tools, self.tool_batch_size), 1):
             if self.verbose:
-                p.yellow(f"Batch {batch_idx}")
+                p.yellow(f"\nProcessing batch {batch_idx}...")
             batch_responses = []
             
             with ThreadPoolExecutor(max_workers=min(len(tool_batch), self.tool_max_workers)) as executor:
@@ -346,14 +410,41 @@ class UltraGPT:
                         result = future.result()
                         if result:
                             batch_responses.append(result)
+                            success_count += 1
                     except Exception as e:
-                        self.log.error("Tool %s failed: %s", tool, str(e))
+                        if self.verbose:
+                            p.red(f"✗ Tool {tool} failed: {str(e)}")
+                        else:
+                            self.log.error("Tool %s failed: %s", tool, str(e))
             
             all_responses.extend(batch_responses)
             if self.verbose:
-                p.green(f"✓ Batch {batch_idx}: {len(batch_responses)}/{len(tool_batch)} tools completed")
-            else:
-                self.log.debug("Batch %d: %d/%d tools completed", 
-                        batch_idx, len(batch_responses), len(tool_batch))
-                    
-        return all_responses
+                p.green(f"✓ Batch {batch_idx}: {len(batch_responses)}/{len(tool_batch)} tools completed\n")
+
+        self.log.info("Tools execution completed (%d/%d successful)", success_count, total_tools)
+        if self.verbose:
+            p.green(f"\n✓ Tools execution completed ({success_count}/{total_tools} successful)")
+            
+        if not all_responses:
+            if self.verbose:
+                p.yellow("\nNo tool responses generated")
+            return ""
+            
+        if self.verbose:
+            p.cyan("\nFormatted Tool Responses:")
+            p.lgray("=" * 40)
+            
+        formatted_responses = []
+        for r in all_responses:
+            tool_name = r['tool'].upper()
+            response = r['response'].strip()
+            formatted = f"[{tool_name}]\n{response}"
+            formatted_responses.append(formatted)
+            if self.verbose:
+                p.lgray(formatted)
+                p.lgray("-" * 40)
+            
+        if self.verbose:
+            p.lgray("=" * 40 + "\n")
+            
+        return "\n\n".join(formatted_responses)
