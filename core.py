@@ -11,7 +11,10 @@ from schemas import Steps, Reasoning
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ultraprint.logging import logger
 from schemas import ToolAnalysisSchema
+
 from tools.web_search.main import _execute as web_search
+from tools.calculator.main import _execute as calculator
+
 from itertools import islice
 
 class UltraGPT:
@@ -30,11 +33,13 @@ class UltraGPT:
         log_extra_info: bool = False,
         log_to_file: bool = False,
         log_level: str = 'DEBUG',
-        use_tools: bool = True,
-        tools: list = ["web-search"],
+        tools: list = ["web-search", "calculator"],
         tools_config: dict = {
             "web-search": {
-                "max_results": 5,
+                "max_results": 1,
+                "model": "gpt-4o"
+            },
+            "calculator": {
                 "model": "gpt-4o"
             }
         },
@@ -53,9 +58,10 @@ class UltraGPT:
         self.tool_batch_size = tool_batch_size
         self.tool_max_workers = tool_max_workers
         
-        supported_tools = ["web-search"]
-        if tools not in supported_tools:
-            raise ValueError(f"Invalid tool: {tools}. Supported tools: {', '.join(supported_tools)}")
+        supported_tools = ["web-search", "calculator"]
+        for tool in tools:
+            if tool not in supported_tools:
+                raise ValueError(f"Invalid tool: {tools}. Supported tools: {', '.join(supported_tools)}")
 
         self.verbose = verbose
         self.log = logger(
@@ -351,6 +357,23 @@ class UltraGPT:
                     history, 
                     self.openai_client, 
                     self.tools_config.get("web-search", {})
+                )
+                self.log.debug("Tool %s completed successfully", tool)
+                if self.verbose:
+                    p.green(f"✓ {tool} returned response:")
+                    p.lgray("-" * 40)
+                    p.lgray(response)
+                    p.lgray("-" * 40)
+                return {
+                    "tool": tool,
+                    "response": response
+                }
+            elif tool == "calculator":
+                response = calculator(
+                    message, 
+                    history, 
+                    self.openai_client, 
+                    self.tools_config.get("calculator", {})
                 )
                 self.log.debug("Tool %s completed successfully", tool)
                 if self.verbose:
