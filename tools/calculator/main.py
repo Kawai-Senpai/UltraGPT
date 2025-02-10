@@ -7,6 +7,7 @@ def extract_system_message(history):
     for message in history:
         if message["role"] == "system" or message["role"] == "developer":
             return message["content"]
+    return ""
 
 def _execute(message, history, client, config):
     """Main function to execute the web search tool"""

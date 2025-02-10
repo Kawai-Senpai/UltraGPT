@@ -483,12 +483,18 @@ class UltraGPT:
             # Add other tool conditions here
             if self.verbose:
                 p.yellow(f"! Tool {tool} not implemented")
-            return None
+            return {
+                "tool": tool,
+                "response": ""
+            }
         except Exception as e:
             self.log.error("Tool %s failed: %s", tool, str(e))
             if self.verbose:
                 p.red(f"\n✗ Tool {tool} failed: {str(e)}")
-            raise e
+            raise {
+                "tool": tool,
+                "response": ""
+            }
 
     def batch_tools(self, tools: list, batch_size: int):
         """Helper function to create batches of tools"""
@@ -508,69 +514,75 @@ class UltraGPT:
         """Execute tools and return formatted responses"""
         if not tools:
             return ""
-            
-        total_tools = len(tools)
-        self.log.info("Executing %d tools in batches of %d", total_tools, tool_batch_size)
-        if self.verbose:
-            p.purple(f"\n➤ Executing {total_tools} tools in batches of {tool_batch_size}")
-            p.yellow("Query: " + message[:100] + "..." if len(message) > 100 else message)
-            p.lgray("-" * 40)
         
-        all_responses = []
-        success_count = 0
-        
-        for batch_idx, tool_batch in enumerate(self.batch_tools(tools, tool_batch_size), 1):
+        try:
+            total_tools = len(tools)
+            self.log.info("Executing %d tools in batches of %d", total_tools, tool_batch_size)
             if self.verbose:
-                p.yellow(f"\nProcessing batch {batch_idx}...")
-            batch_responses = []
-            
-            with ThreadPoolExecutor(max_workers=min(len(tool_batch), tool_max_workers)) as executor:
-                future_to_tool = {
-                    executor.submit(self.execute_tool, tool, message, history, tools_config): tool 
-                    for tool in tool_batch
-                }
-                
-                for future in as_completed(future_to_tool):
-                    tool = future_to_tool[future]
-                    try:
-                        result = future.result()
-                        if result:
-                            batch_responses.append(result)
-                            success_count += 1
-                    except Exception as e:
-                        if self.verbose:
-                            p.red(f"✗ Tool {tool} failed: {str(e)}")
-                        else:
-                            self.log.error("Tool %s failed: %s", tool, str(e))
-            
-            all_responses.extend(batch_responses)
-            if self.verbose:
-                p.green(f"✓ Batch {batch_idx}: {len(batch_responses)}/{len(tool_batch)} tools completed\n")
-
-        self.log.info("Tools execution completed (%d/%d successful)", success_count, total_tools)
-        if self.verbose:
-            p.green(f"\n✓ Tools execution completed ({success_count}/{total_tools} successful)")
-            
-        if not all_responses:
-            if self.verbose:
-                p.yellow("\nNo tool responses generated")
-            return ""
-            
-        if self.verbose:
-            p.cyan("\nFormatted Tool Responses:")
-            p.lgray("=" * 40)
-            
-        formatted_responses = []
-        for r in all_responses:
-            tool_name = r['tool'].upper()
-            response = r['response'].strip()
-            formatted = f"[{tool_name}]\n{response}"
-            formatted_responses.append(formatted)
-            if self.verbose:
-                p.lgray(formatted)
+                p.purple(f"\n➤ Executing {total_tools} tools in batches of {tool_batch_size}")
+                p.yellow("Query: " + message[:100] + "..." if len(message) > 100 else message)
                 p.lgray("-" * 40)
             
-        if self.verbose:
-            p.lgray("=" * 40 + "\n")
+            all_responses = []
+            success_count = 0
             
-        return "\n\n".join(formatted_responses)
+            for batch_idx, tool_batch in enumerate(self.batch_tools(tools, tool_batch_size), 1):
+                if self.verbose:
+                    p.yellow(f"\nProcessing batch {batch_idx}...")
+                batch_responses = []
+                
+                with ThreadPoolExecutor(max_workers=min(len(tool_batch), tool_max_workers)) as executor:
+                    future_to_tool = {
+                        executor.submit(self.execute_tool, tool, message, history, tools_config): tool 
+                        for tool in tool_batch
+                    }
+                    
+                    for future in as_completed(future_to_tool):
+                        tool = future_to_tool[future]
+                        try:
+                            result = future.result()
+                            if result:
+                                batch_responses.append(result)
+                                success_count += 1
+                        except Exception as e:
+                            if self.verbose:
+                                p.red(f"✗ Tool {tool} failed: {str(e)}")
+                            else:
+                                self.log.error("Tool %s failed: %s", tool, str(e))
+                
+                all_responses.extend(batch_responses)
+                if self.verbose:
+                    p.green(f"✓ Batch {batch_idx}: {len(batch_responses)}/{len(tool_batch)} tools completed\n")
+
+            self.log.info("Tools execution completed (%d/%d successful)", success_count, total_tools)
+            if self.verbose:
+                p.green(f"\n✓ Tools execution completed ({success_count}/{total_tools} successful)")
+                
+            if not all_responses:
+                if self.verbose:
+                    p.yellow("\nNo tool responses generated")
+                return ""
+                
+            if self.verbose:
+                p.cyan("\nFormatted Tool Responses:")
+                p.lgray("=" * 40)
+                
+            formatted_responses = []
+            for r in all_responses:
+                tool_name = r['tool'].upper()
+                response = r['response'].strip()
+                formatted = f"[{tool_name}]\n{response}"
+                formatted_responses.append(formatted)
+                if self.verbose:
+                    p.lgray(formatted)
+                    p.lgray("-" * 40)
+                
+            if self.verbose:
+                p.lgray("=" * 40 + "\n")
+                
+            return "\n\n".join(formatted_responses)
+        except Exception as e:
+            self.log.error("Tool execution failed: %s", str(e))
+            if self.verbose:
+                p.red(f"✗ Tool execution failed: {str(e)}")
+            return ""
