@@ -1,10 +1,10 @@
 from .decision import query_finder
 
 #* Web search ---------------------------------------------------------------
-def calculate(message, client, config):
+def calculate(message, client, config, history=None):
     """Perform web search using DuckDuckGo"""
     try:
-        querys = query_finder(message, client, config)
+        querys = query_finder(message, client, config, history)
         addition = querys.get("add", [])
         subtract = querys.get("sub", [])
         multiply = querys.get("mul", [])

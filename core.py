@@ -369,10 +369,17 @@ class UltraGPT:
                 "enable_scraping": True,  # Enable web scraping of search results
                 "max_scrape_length": 5000,  # Max characters per scraped page
                 "scrape_timeout": 15,  # Timeout for scraping requests
-                "scrape_pause": 1  # Pause between scraping requests
+                "scrape_pause": 1,  # Pause between scraping requests
+                "max_history_items": 5  # Max conversation history items to include
             },
-            "calculator": {"model": "gpt-4o"},
-            "math-operations": {"model": "gpt-4o"}
+            "calculator": {
+                "model": "gpt-4o",
+                "max_history_items": 5  # Max conversation history items to include
+            },
+            "math-operations": {
+                "model": "gpt-4o",
+                "max_history_items": 5  # Max conversation history items to include
+            }
         },
         tool_batch_size: int = 3,
         tool_max_workers: int = 10,

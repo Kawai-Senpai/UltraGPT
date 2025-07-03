@@ -15,11 +15,11 @@ def extract_system_message(history):
             return message["content"]
     return ""
 
-def perform_math_operations(message, client, config):
+def perform_math_operations(message, client, config, history=None):
     """Perform mathematical operations using structured parsing"""
     try:
         # Get all operations from the message
-        operations = query_finder(message, client, config)
+        operations = query_finder(message, client, config, history)
         
         if not operations or not isinstance(operations, dict):
             return "No mathematical operations detected in the request."
@@ -163,119 +163,12 @@ def perform_math_operations(message, client, config):
         
     except Exception as e:
         return f"Error performing mathematical operations: {str(e)}"
-        proximity_checks = operations.get("proximity_checks", [])
-        for i, prox_check in enumerate(proximity_checks):
-            numbers = prox_check.get("numbers", [])
-            target = prox_check.get("target")
-            tolerance = prox_check.get("tolerance", 1.0)
-            if numbers and target is not None:
-                result = check_proximity(numbers, target, tolerance)
-                formatted_results.append(f"Proximity Check {i+1}: {result.explanation}")
-                formatted_results.append(f"  Result: {result.result}")
-                if result.details:
-                    formatted_results.append(f"  Details: {result.details}")
-        
-        # Process statistical analyses
-        statistical_analyses = operations.get("statistical_analyses", [])
-        for i, stat_analysis in enumerate(statistical_analyses):
-            numbers = stat_analysis.get("numbers", [])
-            if numbers:
-                result = statistical_summary(numbers)
-                formatted_results.append(f"Statistical Analysis {i+1}: {result.explanation}")
-                if isinstance(result.result, dict):
-                    for key, value in result.result.items():
-                        formatted_results.append(f"  {key}: {value}")
-                else:
-                    formatted_results.append(f"  Result: {result.result}")
-        
-        # Process prime checks
-        prime_checks = operations.get("prime_checks", [])
-        for i, prime_check_req in enumerate(prime_checks):
-            numbers = prime_check_req.get("numbers", [])
-            if numbers:
-                result = prime_check(numbers)
-                formatted_results.append(f"Prime Check {i+1}: {result.explanation}")
-                if isinstance(result.result, dict):
-                    for num, is_prime in result.result.items():
-                        formatted_results.append(f"  {num}: {'Prime' if is_prime else 'Not Prime'}")
-                else:
-                    formatted_results.append(f"  Result: {result.result}")
-                if result.details:
-                    formatted_results.append(f"  Details: {result.details}")
-        
-        # Process factor analyses
-        factor_analyses = operations.get("factor_analyses", [])
-        for i, factor_analysis_req in enumerate(factor_analyses):
-            numbers = factor_analysis_req.get("numbers", [])
-            if numbers:
-                result = factor_analysis(numbers)
-                formatted_results.append(f"Factor Analysis {i+1}: {result.explanation}")
-                if isinstance(result.result, dict):
-                    for num, analysis in result.result.items():
-                        formatted_results.append(f"  {num}:")
-                        formatted_results.append(f"    Factors: {analysis.get('factors', [])}")
-                        formatted_results.append(f"    Prime Factorization: {analysis.get('prime_factorization', [])}")
-                else:
-                    formatted_results.append(f"  Result: {result.result}")
-        
-        # Process sequence analyses
-        sequence_analyses = operations.get("sequence_analyses", [])
-        for i, seq_analysis in enumerate(sequence_analyses):
-            numbers = seq_analysis.get("numbers", [])
-            if numbers:
-                result = check_sequence(numbers)
-                formatted_results.append(f"Sequence Analysis {i+1}: {result.explanation}")
-                if isinstance(result.result, dict):
-                    formatted_results.append(f"  Arithmetic: {result.result.get('is_arithmetic', False)}")
-                    formatted_results.append(f"  Geometric: {result.result.get('is_geometric', False)}")
-                    if result.result.get('arithmetic_difference'):
-                        formatted_results.append(f"  Arithmetic Difference: {result.result['arithmetic_difference']}")
-                    if result.result.get('geometric_ratio'):
-                        formatted_results.append(f"  Geometric Ratio: {result.result['geometric_ratio']}")
-                else:
-                    formatted_results.append(f"  Result: {result.result}")
-        
-        # Process percentage operations
-        percentage_operations_list = operations.get("percentage_operations", [])
-        for i, perc_op in enumerate(percentage_operations_list):
-            numbers = perc_op.get("numbers", [])
-            operation_type = perc_op.get("operation_type", "percentage_of_total")
-            if numbers:
-                result = percentage_operations(numbers, operation_type)
-                formatted_results.append(f"Percentage Operation {i+1}: {result.explanation}")
-                if isinstance(result.result, dict):
-                    for num, percentage in result.result.items():
-                        formatted_results.append(f"  {num}: {percentage:.2f}%")
-                elif isinstance(result.result, list):
-                    for j, perc in enumerate(result.result):
-                        formatted_results.append(f"  Change {j+1}: {perc:.2f}%")
-                else:
-                    formatted_results.append(f"  Result: {result.result}")
-                if result.details:
-                    formatted_results.append(f"  Details: {result.details}")
-        
-        # Process outlier detections
-        outlier_detections = operations.get("outlier_detections", [])
-        for i, outlier_detection in enumerate(outlier_detections):
-            numbers = outlier_detection.get("numbers", [])
-            method = outlier_detection.get("method", "iqr")
-            if numbers:
-                result = find_outliers(numbers, method)
-                formatted_results.append(f"Outlier Detection {i+1}: {result.explanation}")
-                formatted_results.append(f"  Outliers Found: {result.result}")
-                if result.details:
-                    formatted_results.append(f"  Details: {result.details}")
-        
-        return "\n".join(formatted_results) if formatted_results else "No mathematical operations detected in the request."
-        
-    except Exception as e:
-        return f"Error performing mathematical operations: {str(e)}"
 
 def _execute(message, history, client, config):
     """Main function to execute the math operations tool"""
     system_message = extract_system_message(history)
     if system_message == message:
-        return perform_math_operations(message, client, config)
+        return perform_math_operations(message, client, config, history)
     else:
         full_message = message + "\n" + system_message
-        return perform_math_operations(full_message, client, config)
+        return perform_math_operations(full_message, client, config, history)

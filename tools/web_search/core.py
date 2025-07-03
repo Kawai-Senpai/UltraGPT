@@ -76,7 +76,7 @@ def google_search(query, api_key, search_engine_id, num_results=10):
         return []
 
 #* Web search ---------------------------------------------------------------
-def web_search(message, client, config):
+def web_search(message, client, config, history=None):
     """Perform web search using Google Custom Search API with optional scraping"""
     try:
         # Get required API credentials
@@ -87,7 +87,7 @@ def web_search(message, client, config):
             return ""
         
         # Get search queries
-        queries = query_finder(message, client, config).get("query", [])
+        queries = query_finder(message, client, config, history).get("query", [])
         if not queries:
             return ""
         
