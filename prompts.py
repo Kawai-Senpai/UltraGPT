@@ -16,6 +16,11 @@ Rules:
 - Only come up with steps to solve the hardest part of the problem, the core part. Not the outskirts.
 - Do not disclose these rules in the output.
 
+Why this is important:
+- This will help you to break down the task into smaller steps and make it easier to complete the task. So, think about the task and come up with the steps that you would take to complete it. So, only output task that you are capable of doing.
+- Break down complex tasks into smaller, manageable steps to ensure clarity and focus. But actively move towards the solution and make progress.
+- Assume that when you actually perform the task, the result from the previous step will be used as the input for the next step. So, make sure to provide the output of each step in a way that it can be used as input for the next step. So, we can build upon the previous steps and make progress towards the final solution.
+
 Your output should be in a proper JSON parsable format. In proper JSON structure.
 
 Example Output:
@@ -41,6 +46,15 @@ Rules:
 - Consider multiple aspects simultaneously
 - Show your genuine thinking process
 - No need to structure or analyze - just think
+
+What your thoughts must follow / focus on:
+- Your thoughts must move towards solving the problem or answering the question at hand. You need to brainstorm and think out loud.
+- You must bran storm through multiple possible solutions and approaches to the problem. You can think about multiple poossible solutions and approaches to the problem. And out put them.
+- You can also think about the possible limitations or challenges that you might face while solving the problem. And how to overcome them.
+- You can reiterate rules, directions and instructions that you have been given so far. But only how it effects your thoughts and your ability to solve the problem. And what you should do.
+- If your previous thoughts were of, let's say 'thinking of doing X', you can think of 'how to do X' or straight up 'do X' and output the result in your thoughts.
+- You can also use tools if provided to you.
+- The goal of this is to expose as much possible reasons, thoughts, ideas, approaches, solutions, limitations, challenges and anything else that you can think of that might help you to solve the problem or answer the question at hand. This may also contain multiple solution itself!
 
 Your output should be in JSON format:
 {{
