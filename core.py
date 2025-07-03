@@ -14,6 +14,7 @@ from .schemas import ToolAnalysisSchema
 
 from .tools.web_search.main import _execute as web_search
 from .tools.calculator.main import _execute as calculator
+from .tools.math_operations.main import _execute as math_operations
 
 from itertools import islice
 
@@ -222,10 +223,16 @@ class UltraGPT:
         tools: list,
         tools_config: dict,
         tool_batch_size: int,
-        tool_max_workers: int
+        tool_max_workers: int,
+        steps_model: str = None
     ):
+        # Use steps_model if provided, otherwise use main model
+        active_model = steps_model if steps_model else model
+        
         if self.verbose:
             p.purple("➤ Starting Steps Pipeline")
+            if steps_model:
+                p.cyan(f"Using steps model: {steps_model}")
         else:
             self.log.info("Starting steps pipeline")
         total_tokens = 0
@@ -233,7 +240,7 @@ class UltraGPT:
         messages = self.turnoff_system_message(messages)
         steps_generator_message = messages + [{"role": "system", "content": generate_steps_prompt()}]
 
-        steps_json, tokens = self.chat_with_model_parse(steps_generator_message, schema=Steps, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+        steps_json, tokens = self.chat_with_model_parse(steps_generator_message, schema=Steps, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
         total_tokens += tokens
         steps = steps_json.get("steps", [])
         if self.verbose:
@@ -251,7 +258,7 @@ class UltraGPT:
             self.log.debug("Processing step %d/%d", idx, len(steps))
             step_prompt = each_step_prompt(memory, step)
             step_message = messages + [{"role": "system", "content": step_prompt}]
-            step_response, tokens = self.chat_with_openai_sync(step_message, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+            step_response, tokens = self.chat_with_openai_sync(step_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
             self.log.debug("Step %d response: %s...", idx, step_response[:100])
             total_tokens += tokens
             memory.append(
@@ -264,7 +271,7 @@ class UltraGPT:
         # Generate final conclusion
         conclusion_prompt = generate_conclusion_prompt(memory)
         conclusion_message = messages + [{"role": "system", "content": conclusion_prompt}]
-        conclusion, tokens = self.chat_with_openai_sync(conclusion_message, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+        conclusion, tokens = self.chat_with_openai_sync(conclusion_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
         total_tokens += tokens
 
         if self.verbose:
@@ -284,10 +291,16 @@ class UltraGPT:
         tools: list,
         tools_config: dict,
         tool_batch_size: int,
-        tool_max_workers: int
+        tool_max_workers: int,
+        reasoning_model: str = None
     ):
+        # Use reasoning_model if provided, otherwise use main model
+        active_model = reasoning_model if reasoning_model else model
+        
         if self.verbose:
             p.purple(f"➤ Starting Reasoning Pipeline ({reasoning_iterations} iterations)")
+            if reasoning_model:
+                p.cyan(f"Using reasoning model: {reasoning_model}")
         else:
             self.log.info("Starting reasoning pipeline (%d iterations)", reasoning_iterations)
         total_tokens = 0
@@ -306,7 +319,7 @@ class UltraGPT:
             reasoning_json, tokens = self.chat_with_model_parse(
                 reasoning_message, 
                 schema=Reasoning,
-                model=model,
+                model=active_model,
                 temperature=temperature,
                 tools=tools,
                 tools_config=tools_config,
@@ -337,10 +350,13 @@ class UltraGPT:
         reasoning_iterations: int = 3,
         steps_pipeline: bool = True,
         reasoning_pipeline: bool = True,
-        tools: list = ["web-search", "calculator"],
+        steps_model: str = None,
+        reasoning_model: str = None,
+        tools: list = ["web-search", "calculator", "math-operations"],
         tools_config: dict = {
             "web-search": {"max_results": 1, "model": "gpt-4o"},
-            "calculator": {"model": "gpt-4o"}
+            "calculator": {"model": "gpt-4o"},
+            "math-operations": {"model": "gpt-4o"}
         },
         tool_batch_size: int = 3,
         tool_max_workers: int = 10,
@@ -355,7 +371,9 @@ class UltraGPT:
             reasoning_iterations (int, optional): The number of reasoning iterations. Defaults to 3.
             steps_pipeline (bool, optional): Whether to use steps pipeline. Defaults to True.
             reasoning_pipeline (bool, optional): Whether to use reasoning pipeline. Defaults to True.
-            tools (list, optional): The list of tools to enable. Defaults to ["web-search", "calculator"].
+            steps_model (str, optional): Specific model for steps pipeline. Uses main model if None.
+            reasoning_model (str, optional): Specific model for reasoning pipeline. Uses main model if None.
+            tools (list, optional): The list of tools to enable. Defaults to ["web-search", "calculator", "math-operations"].
             tools_config (dict, optional): The configuration for the tools. Defaults to predefined configurations.
             tool_batch_size (int, optional): The batch size for tool processing. Defaults to 3.
             tool_max_workers (int, optional): The maximum number of workers for tool processing. Defaults to 10.
@@ -387,13 +405,13 @@ class UltraGPT:
             if reasoning_pipeline:
                 futures.append({
                     "type": "reasoning",
-                    "future": executor.submit(self.run_reasoning_pipeline, messages, model, temperature, reasoning_iterations, tools, tools_config, tool_batch_size, tool_max_workers)
+                    "future": executor.submit(self.run_reasoning_pipeline, messages, model, temperature, reasoning_iterations, tools, tools_config, tool_batch_size, tool_max_workers, reasoning_model)
                 })
             
             if steps_pipeline:
                 futures.append({
                     "type": "steps",
-                    "future": executor.submit(self.run_steps_pipeline, messages, model, temperature, tools, tools_config, tool_batch_size, tool_max_workers)
+                    "future": executor.submit(self.run_steps_pipeline, messages, model, temperature, tools, tools_config, tool_batch_size, tool_max_workers, steps_model)
                 })
 
             for future in futures:
@@ -469,6 +487,23 @@ class UltraGPT:
                     history, 
                     self.openai_client, 
                     tools_config.get("calculator", {})
+                )
+                self.log.debug("Tool %s completed successfully", tool)
+                if self.verbose:
+                    p.green(f"✓ {tool} returned response:")
+                    p.lgray("-" * 40)
+                    p.lgray(response)
+                    p.lgray("-" * 40)
+                return {
+                    "tool": tool,
+                    "response": response
+                }
+            elif tool == "math-operations":
+                response = math_operations(
+                    message, 
+                    history, 
+                    self.openai_client, 
+                    tools_config.get("math-operations", {})
                 )
                 self.log.debug("Tool %s completed successfully", tool)
                 if self.verbose:
