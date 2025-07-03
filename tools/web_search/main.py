@@ -5,4 +5,4 @@ _info = "This tool allows you to perform web searches using Google Custom Search
 
 def _execute(message, history, client, config):
     """Main function to execute the web search tool"""
-    return web_search(message, client, config)
+    return web_search(message, client, config, history)

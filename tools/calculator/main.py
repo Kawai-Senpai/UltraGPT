@@ -13,6 +13,6 @@ def _execute(message, history, client, config):
     """Main function to execute the web search tool"""
     system_message = extract_system_message(history)
     if system_message == message:
-        return calculate(message, client, config)
+        return calculate(message, client, config, history)
     else:
-        return calculate(message + "\n" + system_message, client, config)
+        return calculate(message + "\n" + system_message, client, config, history)
