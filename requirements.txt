@@ -1,4 +1,8 @@
 openai==1.59.3
 ultraprint==3.2.0
 pydantic==2.10.4
-duckduckgo_search==7.3.0
+google-api-python-client>=2.0.0
+requests>=2.25.0
+beautifulsoup4>=4.9.0
+readability-lxml>=0.8.0
+lxml>=4.6.0

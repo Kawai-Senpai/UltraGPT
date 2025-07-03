@@ -22,6 +22,8 @@ class UltraGPT:
     def __init__(
         self, 
         api_key: str, 
+        google_api_key: str = None,
+        search_engine_id: str = None,
         verbose: bool = False,
         logger_name: str = 'ultragpt',
         logger_filename: str = 'debug/ultragpt.log',
@@ -33,6 +35,8 @@ class UltraGPT:
         Initialize the UltraGPT class.
         Args:
             api_key (str): The API key for accessing the OpenAI service.
+            google_api_key (str, optional): Google Custom Search API key for web search tool.
+            search_engine_id (str, optional): Google Custom Search Engine ID for web search tool.
             verbose (bool, optional): Whether to enable verbose logging. Defaults to False.
             logger_name (str, optional): The name of the logger. Defaults to 'ultragpt'.
             logger_filename (str, optional): The filename for the logger. Defaults to 'debug/ultragpt.log'.
@@ -45,6 +49,11 @@ class UltraGPT:
 
         # Create the OpenAI client using the provided API key
         self.openai_client = OpenAI(api_key=api_key)
+        
+        # Store Google Search credentials
+        self.google_api_key = google_api_key
+        self.search_engine_id = search_engine_id
+        
         self.verbose = verbose
         self.log = logger(
             name=logger_name,
@@ -354,7 +363,14 @@ class UltraGPT:
         reasoning_model: str = None,
         tools: list = ["web-search", "calculator", "math-operations"],
         tools_config: dict = {
-            "web-search": {"max_results": 1, "model": "gpt-4o"},
+            "web-search": {
+                "max_results": 5, 
+                "model": "gpt-4o",
+                "enable_scraping": True,  # Enable web scraping of search results
+                "max_scrape_length": 5000,  # Max characters per scraped page
+                "scrape_timeout": 15,  # Timeout for scraping requests
+                "scrape_pause": 1  # Pause between scraping requests
+            },
             "calculator": {"model": "gpt-4o"},
             "math-operations": {"model": "gpt-4o"}
         },
@@ -454,7 +470,13 @@ class UltraGPT:
             p.blue("="*50)
         else:
             self.log.info("Chat completed (total tokens: %d)", total_tokens)
-        return final_output, total_tokens, details_dict
+        
+        # Return as dict for consistent API
+        return {
+            "output": final_output,
+            "total_tokens": total_tokens,
+            "details": details_dict
+        }
 
     #! Tools ----------------------------------------------------------------
     def execute_tool(self, tool: str, message: str, history: list, tools_config: dict) -> dict:
@@ -465,17 +487,36 @@ class UltraGPT:
                 p.cyan(f"\nExecuting tool: {tool}")
                 
             if tool == "web-search":
+                # Merge Google credentials with config, allowing override
+                web_search_config = tools_config.get("web-search", {}).copy()
+                web_search_config.update({
+                    "google_api_key": self.google_api_key,
+                    "search_engine_id": web_search_config.get("search_engine_id", self.search_engine_id)
+                })
+                
                 response = web_search(
                     message, 
                     history, 
                     self.openai_client, 
-                    tools_config.get("web-search", {})
+                    web_search_config
                 )
+                
+                # Log specific web search issues for debugging
+                if not response:
+                    if not self.google_api_key or not web_search_config.get("search_engine_id"):
+                        self.log.warning("Web search skipped: Missing Google API credentials")
+                        if self.verbose:
+                            p.yellow("⚠ Web search skipped: Missing Google API credentials")
+                    else:
+                        self.log.warning("Web search returned no results (quota/API error)")
+                        if self.verbose:
+                            p.yellow("⚠ Web search returned no results (quota/API error)")
+                
                 self.log.debug("Tool %s completed successfully", tool)
                 if self.verbose:
                     p.green(f"✓ {tool} returned response:")
                     p.lgray("-" * 40)
-                    p.lgray(response)
+                    p.lgray(response if response else "(empty - no results)")
                     p.lgray("-" * 40)
                 return {
                     "tool": tool,
@@ -526,9 +567,9 @@ class UltraGPT:
             self.log.error("Tool %s failed: %s", tool, str(e))
             if self.verbose:
                 p.red(f"\n✗ Tool {tool} failed: {str(e)}")
-            raise {
+            return {
                 "tool": tool,
-                "response": ""
+                "response": f"Tool {tool} failed: {str(e)}"
             }
 
     def batch_tools(self, tools: list, batch_size: int):
