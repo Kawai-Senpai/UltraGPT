@@ -478,12 +478,8 @@ class UltraGPT:
         else:
             self.log.info("Chat completed (total tokens: %d)", total_tokens)
         
-        # Return as dict for consistent API
-        return {
-            "output": final_output,
-            "total_tokens": total_tokens,
-            "details": details_dict
-        }
+        # Return as tuple for consistent API
+        return final_output, total_tokens, details_dict
 
     #! Tools ----------------------------------------------------------------
     def execute_tool(self, tool: str, message: str, history: list, tools_config: dict) -> dict:
