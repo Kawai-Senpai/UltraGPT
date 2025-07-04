@@ -478,7 +478,8 @@ class UltraGPT:
         else:
             self.log.info("Chat completed (total tokens: %d)", total_tokens)
         
-        # Return as tuple for consistent API
+        #! Return as tuple for consistent API 
+        #! DO NOT CHANGE THIS RETURN FORMAT
         return final_output, total_tokens, details_dict
 
     #! Tools ----------------------------------------------------------------
