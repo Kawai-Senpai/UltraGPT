@@ -4,13 +4,13 @@ from .prompts import (
 generate_steps_prompt, 
 each_step_prompt, generate_reasoning_prompt, 
 generate_conclusion_prompt, combine_all_pipeline_prompts,
-make_tool_analysis_prompt
+make_tool_analysis_prompt, generate_tool_call_prompt,
+generate_single_tool_call_prompt, generate_multiple_tool_call_prompt
 )
 from pydantic import BaseModel
-from .schemas import Steps, Reasoning
+from .schemas import Steps, Reasoning, ToolAnalysisSchema, ToolCallResponse, SingleToolCallResponse, UserTool
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ultraprint.logging import logger
-from .schemas import ToolAnalysisSchema
 
 from .tools.web_search.main import _execute as web_search
 from .tools.calculator.main import _execute as calculator
@@ -666,3 +666,280 @@ class UltraGPT:
             if self.verbose:
                 p.red(f"✗ Tool execution failed: {str(e)}")
             return ""
+
+    #! Tool Call Functionality --------------------------------------------
+    def tool_call(
+        self,
+        messages: list,
+        user_tools: list,
+        allow_multiple: bool = True,
+        model: str = "gpt-4o",
+        temperature: float = 0.7,
+        reasoning_iterations: int = 3,
+        steps_pipeline: bool = True,
+        reasoning_pipeline: bool = True,
+        steps_model: str = None,
+        reasoning_model: str = None,
+        tools: list = ["web-search", "calculator", "math-operations"],
+        tools_config: dict = {
+            "web-search": {
+                "max_results": 5, 
+                "model": "gpt-4o",
+                "enable_scraping": True,
+                "max_scrape_length": 5000,
+                "scrape_timeout": 15,
+                "scrape_pause": 1,
+                "max_history_items": 5
+            },
+            "calculator": {
+                "model": "gpt-4o",
+                "max_history_items": 5
+            },
+            "math-operations": {
+                "model": "gpt-4o",
+                "max_history_items": 5
+            }
+        },
+        tool_batch_size: int = 3,
+        tool_max_workers: int = 10,
+    ):
+        """
+        Tool call functionality that uses UltraGPT's execution layer to determine 
+        which user-defined tools to call and with what parameters.
+        
+        Args:
+            messages (list): A list of message dictionaries to be processed.
+            user_tools (list): List of user-defined tools with schemas and prompts.
+            allow_multiple (bool, optional): Whether to allow multiple tool calls. Defaults to True.
+            model (str, optional): The model to use. Defaults to "gpt-4o".
+            temperature (float, optional): The temperature for the model's output. Defaults to 0.7.
+            reasoning_iterations (int, optional): The number of reasoning iterations. Defaults to 3.
+            steps_pipeline (bool, optional): Whether to use steps pipeline. Defaults to True.
+            reasoning_pipeline (bool, optional): Whether to use reasoning pipeline. Defaults to True.
+            steps_model (str, optional): Specific model for steps pipeline. Uses main model if None.
+            reasoning_model (str, optional): Specific model for reasoning pipeline. Uses main model if None.
+            tools (list, optional): The list of internal tools to enable. Defaults to ["web-search", "calculator", "math-operations"].
+            tools_config (dict, optional): The configuration for internal tools.
+            tool_batch_size (int, optional): The batch size for tool processing. Defaults to 3.
+            tool_max_workers (int, optional): The maximum number of workers for tool processing. Defaults to 10.
+        
+        Returns:
+            tuple: A tuple containing the tool call response and total tokens used.
+                - tool_call_response: The tool calls with parameters and reasoning.
+                - total_tokens (int): The total number of tokens used during the session.
+        """
+        if self.verbose:
+            p.blue("="*50)
+            p.blue("Starting UltraGPT Tool Call Mode")
+            p.blue("="*50)
+            tool_names = []
+            for tool in user_tools:
+                if isinstance(tool, dict):
+                    tool_names.append(tool.get('name', 'Unknown'))
+                else:
+                    tool_names.append(getattr(tool, 'name', 'Unknown'))
+            p.cyan(f"User Tools: {tool_names}")
+            p.cyan(f"Allow Multiple: {allow_multiple}")
+        else:
+            self.log.info("Starting tool call mode with %d user tools", len(user_tools))
+        
+        # Validate user tools
+        validated_tools = self._validate_user_tools(user_tools)
+        
+        # Create dynamic schemas based on user tools
+        dynamic_schema = self._create_dynamic_tool_schema(validated_tools, allow_multiple)
+        
+        # Create tool call prompt
+        if allow_multiple:
+            tool_prompt = generate_multiple_tool_call_prompt(validated_tools)
+        else:
+            tool_prompt = generate_single_tool_call_prompt(validated_tools)
+        
+        # Add tool call prompt to messages
+        tool_call_messages = messages + [{"role": "system", "content": tool_prompt}]
+        
+        # Use UltraGPT's execution layer to analyze and determine tool calls
+        reasoning_output = []
+        reasoning_tokens = 0
+        steps_output = {"steps": [], "conclusion": ""}
+        steps_tokens = 0
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = []
+            
+            if reasoning_pipeline:
+                future = executor.submit(
+                    self.run_reasoning_pipeline,
+                    tool_call_messages, model, temperature, reasoning_iterations,
+                    tools, tools_config, tool_batch_size, tool_max_workers, reasoning_model
+                )
+                futures.append(("reasoning", future))
+            
+            if steps_pipeline:
+                future = executor.submit(
+                    self.run_steps_pipeline,
+                    tool_call_messages, model, temperature,
+                    tools, tools_config, tool_batch_size, tool_max_workers, steps_model
+                )
+                futures.append(("steps", future))
+            
+            for name, future in futures:
+                try:
+                    result, tokens = future.result()
+                    if name == "reasoning":
+                        reasoning_output = result
+                        reasoning_tokens = tokens
+                    elif name == "steps":
+                        steps_output = result
+                        steps_tokens = tokens
+                except Exception as e:
+                    self.log.error("Pipeline %s failed: %s", name, str(e))
+                    if self.verbose:
+                        p.red(f"✗ {name.title()} pipeline failed: {str(e)}")
+
+        # Combine pipeline outputs for enhanced tool decision making
+        conclusion = steps_output.get("conclusion", "")
+        steps = steps_output.get("steps", [])
+
+        if reasoning_pipeline or steps_pipeline:
+            combined_prompt = combine_all_pipeline_prompts(reasoning_output, conclusion)
+            enhanced_messages = self.append_message_to_system(tool_call_messages, combined_prompt)
+        else:
+            enhanced_messages = tool_call_messages
+
+        # Generate tool call response using structured output
+        tool_call_response, tokens = self.chat_with_model_parse(
+            enhanced_messages, 
+            schema=dynamic_schema, 
+            model=model, 
+            temperature=temperature,
+            tools=tools,
+            tools_config=tools_config,
+            tool_batch_size=tool_batch_size,
+            tool_max_workers=tool_max_workers
+        )
+
+        total_tokens = reasoning_tokens + steps_tokens + tokens
+        
+        if self.verbose:
+            p.green("✓ Tool call analysis completed")
+            if allow_multiple:
+                p.cyan(f"Generated {len(tool_call_response.get('tool_calls', []))} tool calls")
+                for i, tool_call in enumerate(tool_call_response.get('tool_calls', []), 1):
+                    p.yellow(f"  {i}. {tool_call.get('tool_name')} - {tool_call.get('reasoning')}")
+            else:
+                tool_call = tool_call_response.get('tool_call', {})
+                p.yellow(f"Selected tool: {tool_call.get('tool_name')} - {tool_call.get('reasoning')}")
+            p.blue(f"Total tokens used: {total_tokens}")
+        else:
+            self.log.info("Tool call completed with %d tokens", total_tokens)
+        
+        return tool_call_response, total_tokens
+
+    def _validate_user_tools(self, user_tools: list) -> list:
+        """Validate and format user tools"""
+        validated_tools = []
+        
+        for tool in user_tools:
+            if isinstance(tool, dict):
+                # Ensure all required fields are present
+                required_fields = ['name', 'description', 'parameters_schema', 'usage_guide', 'when_to_use']
+                if all(field in tool for field in required_fields):
+                    validated_tools.append(tool)
+                else:
+                    missing = [field for field in required_fields if field not in tool]
+                    self.log.warning("Tool missing required fields: %s", missing)
+                    if self.verbose:
+                        p.yellow(f"⚠ Tool missing fields: {missing}")
+            elif hasattr(tool, 'model_dump'):
+                # Pydantic model
+                validated_tools.append(tool.model_dump())
+            else:
+                self.log.warning("Invalid tool format: %s", type(tool))
+                if self.verbose:
+                    p.yellow(f"⚠ Invalid tool format: {type(tool)}")
+        
+        return validated_tools
+    
+    def _create_dynamic_tool_schema(self, validated_tools: list, allow_multiple: bool):
+        """Create dynamic Pydantic schema based on user tools"""
+        from pydantic import create_model
+        from typing import Any, Dict
+        
+        # Create individual tool call models for each tool
+        tool_models = {}
+        
+        for tool in validated_tools:
+            tool_name = tool['name']
+            tool_schema = tool['parameters_schema']
+            
+            # Create dynamic model for this specific tool's parameters
+            param_fields = {}
+            for prop_name, prop_def in tool_schema.get('properties', {}).items():
+                python_type = self._convert_json_schema_to_python_type(prop_def)
+                is_required = prop_name in tool_schema.get('required', [])
+                
+                if is_required:
+                    param_fields[prop_name] = (python_type, ...)
+                else:
+                    default_value = prop_def.get('default', None)
+                    param_fields[prop_name] = (python_type, default_value)
+            
+            # Create the parameter model
+            param_model_name = f"{tool_name.title().replace('_', '')}Params"
+            param_model = create_model(param_model_name, **param_fields)
+            
+            # Create the tool call model
+            tool_call_fields = {
+                'tool_name': (str, tool_name),
+                'parameters': (param_model, ...),
+                'reasoning': (str, ...)
+            }
+            
+            tool_call_model_name = f"{tool_name.title().replace('_', '')}ToolCall"
+            tool_models[tool_name] = create_model(tool_call_model_name, **tool_call_fields)
+        
+        if allow_multiple:
+            # For multiple tools, create a response with a list of any tool call
+            if len(tool_models) == 1:
+                tool_type = list(tool_models.values())[0]
+            else:
+                from typing import Union
+                tool_type = Union[tuple(tool_models.values())]
+            
+            response_fields = {
+                'tool_calls': (list[tool_type], ...)
+            }
+            return create_model('DynamicMultipleToolCallResponse', **response_fields)
+        else:
+            # For single tool, create a response with one tool call
+            if len(tool_models) == 1:
+                tool_type = list(tool_models.values())[0]
+            else:
+                from typing import Union
+                tool_type = Union[tuple(tool_models.values())]
+            
+            response_fields = {
+                'tool_call': (tool_type, ...)
+            }
+            return create_model('DynamicSingleToolCallResponse', **response_fields)
+    
+    def _convert_json_schema_to_python_type(self, schema_def):
+        """Convert JSON schema type to Python type"""
+        schema_type = schema_def.get('type', 'string')
+        
+        if schema_type == 'string':
+            return str
+        elif schema_type == 'integer':
+            return int
+        elif schema_type == 'number':
+            return float
+        elif schema_type == 'boolean':
+            return bool
+        elif schema_type == 'array':
+            items_type = self._convert_json_schema_to_python_type(schema_def.get('items', {'type': 'string'}))
+            return list[items_type]
+        elif schema_type == 'object':
+            return dict
+        else:
+            return str  # Default to string

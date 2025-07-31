@@ -148,3 +148,46 @@ Rules:
 def format_tool_response(tool_response: str) -> str:
     """Format tool response for inclusion in context"""
     return f"\n\nTool response: {tool_response}" if tool_response else ""
+
+def generate_tool_call_prompt(user_tools: list, allow_multiple: bool = True) -> str:
+    """Generate prompt for tool calling functionality"""
+    tools_info = ""
+    for tool in user_tools:
+        tools_info += f"""
+Tool Name: {tool['name']}
+Description: {tool['description']}
+When to use: {tool['when_to_use']}
+Usage Guide: {tool['usage_guide']}
+Parameters Schema: {tool['parameters_schema']}
+---
+"""
+    
+    multiple_instruction = "You can call multiple tools if needed." if allow_multiple else "You can only call ONE tool at a time."
+    
+    return f"""You are an expert AI assistant with access to the following tools. Your task is to analyze the user's request and determine which tool(s) to call and with what parameters.
+
+Available Tools:
+{tools_info}
+
+Instructions:
+- Carefully analyze the user's request to understand what they need
+- Use your reasoning capabilities to determine which tool(s) would be most appropriate
+- Generate the exact parameters needed for each tool call based on the user's request
+- {multiple_instruction}
+- If no tools are needed, return an empty list
+- Always provide clear reasoning for why you chose each tool and parameters
+
+For each tool call, you must:
+1. Identify the most appropriate tool for the task
+2. Extract or generate the exact parameters needed from the user's request
+3. Provide clear reasoning for your choice
+
+Your response must be in the specified JSON format with tool calls and reasoning."""
+
+def generate_single_tool_call_prompt(user_tools: list) -> str:
+    """Generate prompt for single tool calling"""
+    return generate_tool_call_prompt(user_tools, allow_multiple=False)
+
+def generate_multiple_tool_call_prompt(user_tools: list) -> str:
+    """Generate prompt for multiple tool calling"""
+    return generate_tool_call_prompt(user_tools, allow_multiple=True)
