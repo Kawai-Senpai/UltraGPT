@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from .schemas import Steps, Reasoning, ToolAnalysisSchema, ToolCallResponse, SingleToolCallResponse, UserTool
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ultraprint.logging import logger
+from .providers import ProviderManager, OpenAIProvider, ClaudeProvider
 
 from .tools.web_search.main import _execute as web_search
 from .tools.calculator.main import _execute as calculator
@@ -20,7 +21,9 @@ from itertools import islice
 class UltraGPT:
     def __init__(
         self, 
-        api_key: str, 
+        api_key: str = None,
+        openai_api_key: str = None,
+        claude_api_key: str = None,
         google_api_key: str = None,
         search_engine_id: str = None,
         verbose: bool = False,
@@ -32,9 +35,10 @@ class UltraGPT:
         log_level: str = 'DEBUG',
     ):
         """
-        Initialize the UltraGPT class.
+        Initialize the UltraGPT class with multi-provider support.
         Args:
-            api_key (str): The API key for accessing the OpenAI service.
+            api_key (str, optional): The API key for accessing the OpenAI service.
+            claude_api_key (str, optional): The API key for accessing Claude/Anthropic service.
             google_api_key (str, optional): Google Custom Search API key for web search tool.
             search_engine_id (str, optional): Google Custom Search Engine ID for web search tool.
             verbose (bool, optional): Whether to enable verbose logging. Defaults to False.
@@ -45,11 +49,32 @@ class UltraGPT:
             log_to_console (bool, optional): Whether to log to console. Defaults to True.
             log_level (str, optional): The logging level. Defaults to 'DEBUG'.
         Raises:
-            ValueError: If an invalid tool is provided.
+            ValueError: If no API keys are provided or if an invalid tool is provided.
         """
 
-        # Create the OpenAI client using the provided API key
-        self.openai_client = OpenAI(api_key=api_key)
+        # Initialize provider manager
+        self.provider_manager = ProviderManager()
+        
+        # Add providers based on available API keys
+        if api_key or openai_api_key:
+            openai_provider = OpenAIProvider(api_key=api_key or openai_api_key)
+            self.provider_manager.add_provider("openai", openai_provider)
+            
+        if claude_api_key:
+            try:
+                claude_provider = ClaudeProvider(api_key=claude_api_key)
+                self.provider_manager.add_provider("claude", claude_provider)
+            except ImportError as e:
+                if verbose:
+                    print(f"Warning: Claude provider not available: {e}")
+        
+        # Ensure at least one provider is available
+        if not self.provider_manager.providers:
+            raise ValueError("At least one API key (api_key or claude_api_key) must be provided")
+        
+        # Keep backward compatibility
+        if api_key:
+            self.openai_client = OpenAI(api_key=api_key)
         
         # Store Google Search credentials
         self.google_api_key = google_api_key
@@ -71,7 +96,7 @@ class UltraGPT:
             self.log.debug("Initializing UltraGPT")
             self.log.debug("=" * 50)
 
-    def chat_with_openai_sync(
+    def chat_with_ai_sync(
         self,
         messages: list,
         model: str,
@@ -82,10 +107,10 @@ class UltraGPT:
         tool_max_workers: int
     ):
         """
-        Sends a synchronous chat request to OpenAI and processes the response.
+        Sends a synchronous chat request to the specified AI provider and processes the response.
         Args:
-            messages (list): A list of message dictionaries to be sent to OpenAI.
-            model (str): The model to use.
+            messages (list): A list of message dictionaries to be sent to the AI provider.
+            model (str): The model to use (format: "provider:model" or just "model" for OpenAI).
             temperature (float): The temperature for the model's output.
             tools (list): The list of tools to enable.
             tools_config (dict): The configuration for the tools.
@@ -94,15 +119,16 @@ class UltraGPT:
         Returns:
             tuple: A tuple containing the response content (str) and the total number of tokens used (int).
         Raises:
-            Exception: If the request to OpenAI fails.
+            Exception: If the request to the AI provider fails.
         Logs:
             Debug: Logs the number of messages sent, the number of tokens in the response, and any errors encountered.
             Verbose: Optionally logs detailed steps of the request and response process.
         """
         try:
-            self.log.debug("Sending request to OpenAI (msgs: " + str(len(messages)) + ")")
+            self.log.debug("Sending request to AI provider (msgs: " + str(len(messages)) + ")")
             if self.verbose:
-                self.log.debug("OpenAI Request → Messages: " + str(len(messages)))
+                provider_name, model_name = self.provider_manager.parse_model_string(model)
+                self.log.debug(f"AI Request → Provider: {provider_name}, Model: {model_name}, Messages: " + str(len(messages)))
                 self.log.debug("Checking for tool needs...")
             
             tool_response = self.execute_tools(message=messages[-1]["content"], history=messages, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
@@ -114,22 +140,20 @@ class UltraGPT:
             elif self.verbose:
                 self.log.debug("No tool responses needed")
             
-            response = self.openai_client.chat.completions.create(
+            content, tokens = self.provider_manager.chat_completion(
                 model=model,
                 messages=messages,
-                stream=False,
                 temperature=temperature
             )
-            content = response.choices[0].message.content.strip()
-            tokens = response.usage.total_tokens
+            
             self.log.debug("Response received (tokens: " + str(tokens) + ")")
             if self.verbose:
                 self.log.debug("✓ Response received (" + str(tokens) + " tokens)")
             return content, tokens
         except Exception as e:
-            self.log.error("OpenAI sync request failed: " + str(e))
+            self.log.error("AI sync request failed: " + str(e))
             if self.verbose:
-                self.log.debug("✗ OpenAI request failed: " + str(e))
+                self.log.debug("✗ AI request failed: " + str(e))
             raise e
 
     def chat_with_model_parse(
@@ -148,7 +172,7 @@ class UltraGPT:
         Args:
             messages (list): A list of message dictionaries to be sent to the model.
             schema (optional): The schema to be used for parsing the response. Defaults to None.
-            model (str): The model to use.
+            model (str): The model to use (format: "provider:model" or just "model" for OpenAI).
             temperature (float): The temperature for the model's output.
             tools (list): The list of tools to enable.
             tools_config (dict): The configuration for the tools.
@@ -167,16 +191,12 @@ class UltraGPT:
                 tool_response = "Tool Responses:\n" + tool_response
             messages = self.append_message_to_system(messages, tool_response)
 
-            response = self.openai_client.beta.chat.completions.parse(
+            content, tokens = self.provider_manager.chat_completion_with_schema(
                 model=model,
                 messages=messages,
-                response_format=schema,
+                schema=schema,
                 temperature=temperature
             )
-            content = response.choices[0].message.parsed
-            if isinstance(content, BaseModel):
-                content = content.model_dump(by_alias=True)
-            tokens = response.usage.total_tokens
             
             self.log.debug("Parse response received (tokens: " + str(tokens) + ")")
             return content, tokens
@@ -308,7 +328,7 @@ class UltraGPT:
             self.log.debug("Processing step " + str(idx) + "/" + str(len(steps)))
             step_prompt = each_step_prompt(memory, step)
             step_message = messages + [{"role": "system", "content": step_prompt}]
-            step_response, tokens = self.chat_with_openai_sync(step_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+            step_response, tokens = self.chat_with_ai_sync(step_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
             self.log.debug("Step " + str(idx) + " response: " + step_response[:100] + "...")
             total_tokens += tokens
             memory.append(
@@ -321,7 +341,7 @@ class UltraGPT:
         # Generate final conclusion
         conclusion_prompt = generate_conclusion_prompt(memory)
         conclusion_message = messages + [{"role": "system", "content": conclusion_prompt}]
-        conclusion, tokens = self.chat_with_openai_sync(conclusion_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+        conclusion, tokens = self.chat_with_ai_sync(conclusion_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
         total_tokens += tokens
 
         if self.verbose:
@@ -395,18 +415,18 @@ class UltraGPT:
         self,
         messages: list,
         schema=None,
-        model: str = "gpt-4o",
+        model: str = "gpt-4o",  # Format: "provider:model" or just "model" (defaults to OpenAI)
         temperature: float = 0.7,
         reasoning_iterations: int = 3,
         steps_pipeline: bool = True,
         reasoning_pipeline: bool = True,
-        steps_model: str = None,
-        reasoning_model: str = None,
+        steps_model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)
+        reasoning_model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)
         tools: list = ["web-search", "calculator", "math-operations"],
         tools_config: dict = {
             "web-search": {
                 "max_results": 5, 
-                "model": "gpt-4o",
+                "model": "gpt-4o",  # Can be "openai:gpt-4o" or "claude:claude-3-sonnet-20240229"
                 "enable_scraping": True,  # Enable web scraping of search results
                 "max_scrape_length": 5000,  # Max characters per scraped page
                 "scrape_timeout": 15,  # Timeout for scraping requests
@@ -414,11 +434,11 @@ class UltraGPT:
                 "max_history_items": 5  # Max conversation history items to include
             },
             "calculator": {
-                "model": "gpt-4o",
+                "model": "gpt-4o",  # Can be "openai:gpt-4o" or "claude:claude-3-sonnet-20240229"
                 "max_history_items": 5  # Max conversation history items to include
             },
             "math-operations": {
-                "model": "gpt-4o",
+                "model": "gpt-4o",  # Can be "openai:gpt-4o" or "claude:claude-3-sonnet-20240229"
                 "max_history_items": 5  # Max conversation history items to include
             }
         },
@@ -430,15 +450,15 @@ class UltraGPT:
         Args:
             messages (list): A list of message dictionaries to be processed.
             schema (optional): A schema to parse the final output, defaults to None.
-            model (str, optional): The model to use. Defaults to "gpt-4o".
+            model (str, optional): The model to use. Format: "provider:model" (e.g., "claude:claude-3-sonnet-20240229") or just "model" (defaults to OpenAI). Defaults to "gpt-4o".
             temperature (float, optional): The temperature for the model's output. Defaults to 0.7.
             reasoning_iterations (int, optional): The number of reasoning iterations. Defaults to 3.
             steps_pipeline (bool, optional): Whether to use steps pipeline. Defaults to True.
             reasoning_pipeline (bool, optional): Whether to use reasoning pipeline. Defaults to True.
-            steps_model (str, optional): Specific model for steps pipeline. Uses main model if None.
-            reasoning_model (str, optional): Specific model for reasoning pipeline. Uses main model if None.
+            steps_model (str, optional): Specific model for steps pipeline. Format: "provider:model" or just "model". Uses main model if None.
+            reasoning_model (str, optional): Specific model for reasoning pipeline. Format: "provider:model" or just "model". Uses main model if None.
             tools (list, optional): The list of tools to enable. Defaults to ["web-search", "calculator", "math-operations"].
-            tools_config (dict, optional): The configuration for the tools. Defaults to predefined configurations.
+            tools_config (dict, optional): The configuration for the tools. Each tool's "model" field supports "provider:model" format. Defaults to predefined configurations.
             tool_batch_size (int, optional): The batch size for tool processing. Defaults to 3.
             tool_max_workers (int, optional): The maximum number of workers for tool processing. Defaults to 10.
         Returns:
@@ -446,6 +466,11 @@ class UltraGPT:
                 - final_output: The final response from the chat model.
                 - total_tokens (int): The total number of tokens used during the session.
                 - details_dict (dict): A dictionary with detailed information about the session.
+                
+        Model Format Examples:
+            - "gpt-4o" or "openai:gpt-4o" → OpenAI GPT-4o
+            - "claude:claude-3-sonnet-20240229" → Anthropic Claude 3 Sonnet
+            - "claude:claude-3-haiku-20240307" → Anthropic Claude 3 Haiku
         """
         if self.verbose:
             self.log.debug("=" * 50)
@@ -494,7 +519,7 @@ class UltraGPT:
         if schema:
             final_output, tokens = self.chat_with_model_parse(messages, schema=schema, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
         else:
-            final_output, tokens = self.chat_with_openai_sync(messages, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+            final_output, tokens = self.chat_with_ai_sync(messages, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
 
         if steps:
             steps.append(conclusion)
@@ -542,7 +567,7 @@ class UltraGPT:
                 response = web_search(
                     message, 
                     history, 
-                    self.openai_client, 
+                    self, 
                     web_search_config
                 )
                 
@@ -571,7 +596,7 @@ class UltraGPT:
                 response = calculator(
                     message, 
                     history, 
-                    self.openai_client, 
+                    self, 
                     tools_config.get("calculator", {})
                 )
                 self.log.debug("Tool " + tool + " completed successfully")
@@ -588,7 +613,7 @@ class UltraGPT:
                 response = math_operations(
                     message, 
                     history, 
-                    self.openai_client, 
+                    self, 
                     tools_config.get("math-operations", {})
                 )
                 self.log.debug("Tool " + tool + " completed successfully")
@@ -714,13 +739,13 @@ class UltraGPT:
         messages: list,
         user_tools: list,
         allow_multiple: bool = True,
-        model: str = "gpt-4o",
+        model: str = "gpt-4o",  # Format: "provider:model" or just "model" (defaults to OpenAI)
         temperature: float = 0.7,
         reasoning_iterations: int = 3,
         steps_pipeline: bool = True,
         reasoning_pipeline: bool = True,
-        steps_model: str = None,
-        reasoning_model: str = None,
+        steps_model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)  
+        reasoning_model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)
         tools: list = ["web-search", "calculator", "math-operations"],
         tools_config: dict = {
             "web-search": {
@@ -752,13 +777,13 @@ class UltraGPT:
             messages (list): A list of message dictionaries to be processed.
             user_tools (list): List of user-defined tools with schemas and prompts.
             allow_multiple (bool, optional): Whether to allow multiple tool calls. Defaults to True.
-            model (str, optional): The model to use. Defaults to "gpt-4o".
+            model (str, optional): The model to use. Format: "provider:model" or just "model" (defaults to OpenAI). Defaults to "gpt-4o".
             temperature (float, optional): The temperature for the model's output. Defaults to 0.7.
             reasoning_iterations (int, optional): The number of reasoning iterations. Defaults to 3.
             steps_pipeline (bool, optional): Whether to use steps pipeline. Defaults to True.
             reasoning_pipeline (bool, optional): Whether to use reasoning pipeline. Defaults to True.
-            steps_model (str, optional): Specific model for steps pipeline. Uses main model if None.
-            reasoning_model (str, optional): Specific model for reasoning pipeline. Uses main model if None.
+            steps_model (str, optional): Specific model for steps pipeline. Format: "provider:model" or just "model". Uses main model if None.
+            reasoning_model (str, optional): Specific model for reasoning pipeline. Format: "provider:model" or just "model". Uses main model if None.
             tools (list, optional): The list of internal tools to enable. Defaults to ["web-search", "calculator", "math-operations"].
             tools_config (dict, optional): The configuration for internal tools.
             tool_batch_size (int, optional): The batch size for tool processing. Defaults to 3.

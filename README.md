@@ -1,48 +1,86 @@
 # 🤖 UltraGPT
 
-**A powerful and modular library for advanced GPT-based reasoning and step pipelines**
+**A powerful and modular library for advanced AI-based reasoning and step pipelines with multi-provider support**
+
+[![Python](https://img.shields.io/badge/python-3.6+-blue.svg)](https://python.org)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE.rst)
+[![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4-orange.svg)](https://openai.com)
+[![Anthropic](https://img.shields.io/badge/Anthropic-Claude-purple.svg)](https://anthropic.com)
 
 ## 🌟 Features
 
+- **🔄 Multi-Provider Support:** Use OpenAI and Anthropic Claude models seamlessly
 - **📝 Steps Pipeline:** Break down complex tasks into manageable steps
-  - Automatic step generation and processing
-  - Verification at each step
-  - Detailed progress tracking
-
-- **🧠 Reasoning Pipeline:** Advanced reasoning capabilities
-  - Multi-iteration thought process
-  - Building upon previous reasoning
-  - Comprehensive analysis
-
-- **🛠️ Tool Integration:** 
-  - Web search (Google Custom Search API, with scraping)
-  - Calculator functionality
-  - Extensible tool framework
+- **🧠 Reasoning Pipeline:** Advanced multi-iteration reasoning capabilities
+- **🛠️ Tool Integration:** Web search, calculator, math operations, and custom tools
+- **🎯 Structured Output:** Get structured responses using Pydantic schemas
+- **� Tool Calling:** Execute custom tools with validated parameters
+- **📊 Token Management:** Comprehensive token tracking across providers
 
 ## 📦 Installation
 
 ```bash
-pip install git+https://github.com/Kawai-Senpai/UltraGPT.git
+pip install ultragpt
+
+# For environment variable support (optional)
+pip install python-dotenv
 ```
+
+**Note:** Starting with version 4.0.0, Anthropic Claude support is included by default!
 
 ## 🚀 Quick Start
 
+### Basic Usage (OpenAI)
 ```python
 from ultragpt import UltraGPT
 
-if __name__ == "__main__":
-    # Initialize UltraGPT (OpenAI only)
-    ultragpt = UltraGPT(
-        api_key="your-openai-api-key",
-        verbose=True
-    )
+# Initialize with OpenAI (default)
+ultragpt = UltraGPT(api_key="your-openai-api-key")
 
-    # Example chat session
-    result = ultragpt.chat([
-        {"role": "user", "content": "Write a story about an elephant."}
-    ])
-    print("Final Output:", result["output"])
-    print("Total tokens used:", result["total_tokens"])
+# Simple chat
+response, tokens, details = ultragpt.chat([
+    {"role": "user", "content": "Write a story about an elephant."}
+])
+print("Response:", response)
+print("Tokens used:", tokens)
+```
+
+### Multi-Provider Support
+```python
+from ultragpt import UltraGPT
+
+# OpenAI (default)
+ultragpt_openai = UltraGPT(api_key="your-openai-api-key")
+
+# Claude
+ultragpt_claude = UltraGPT(
+    api_key="your-anthropic-api-key", 
+    provider="anthropic"
+)
+
+# Both work the same way!
+response, tokens, details = ultragpt_claude.chat([
+    {"role": "user", "content": "Hello Claude!"}
+])
+```
+
+### Provider:Model Format
+```python
+# Use provider:model format for specific models
+ultragpt = UltraGPT(
+    api_key="your-openai-api-key",
+    claude_api_key="your-anthropic-api-key"  # For Claude models
+)
+
+# OpenAI models
+response = ultragpt.chat([
+    {"role": "user", "content": "Hello!"}
+], model="openai:gpt-4o")
+
+# Claude models  
+response = ultragpt.chat([
+    {"role": "user", "content": "Hello!"}
+], model="claude:claude-3-sonnet-20240229")
 ```
 
 ## 🌐 Web Search (Google) & Scraping

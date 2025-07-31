@@ -21,12 +21,28 @@ def query_finder(message, client, config, history=None):
     # Add the system message at the end
     messages.append({"role": "system", "content": prompt})
     
-    response = client.beta.chat.completions.parse(
-        model=config.get("model", "gpt-4o"),
-        messages=messages,
-        response_format=CalculatorQuery
-    )
-    content = response.choices[0].message.parsed
+    # Get model from config - can now include provider specification
+    model = config.get("model", "gpt-4o")
+    
+    # Use the provider manager if available (new multi-provider approach)
+    if hasattr(client, 'provider_manager'):
+        response_content, tokens = client.provider_manager.chat_completion_with_schema(
+            model=model,
+            messages=messages,
+            schema=CalculatorQuery
+        )
+        content = response_content
+    else:
+        # Fallback to legacy OpenAI approach
+        response = client.beta.chat.completions.parse(
+            model=model,
+            messages=messages,
+            response_format=CalculatorQuery
+        )
+        content = response.choices[0].message.parsed
+        if isinstance(content, BaseModel):
+            content = content.model_dump(by_alias=True)
+    
     if not content:
         return {
             "add": [],
@@ -34,7 +50,6 @@ def query_finder(message, client, config, history=None):
             "mul": [],
             "div": []
         }
-    if isinstance(content, BaseModel):
-        content = content.model_dump(by_alias=True)
+    
     return content
 
