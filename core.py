@@ -1,5 +1,4 @@
 from openai import OpenAI 
-import ultraprint.common as p
 from .prompts import (
 generate_steps_prompt, 
 each_step_prompt, generate_reasoning_prompt, 
@@ -29,6 +28,7 @@ class UltraGPT:
         logger_filename: str = 'debug/ultragpt.log',
         log_extra_info: bool = False,
         log_to_file: bool = False,
+        log_to_console: bool = False,
         log_level: str = 'DEBUG',
     ):
         """
@@ -42,6 +42,7 @@ class UltraGPT:
             logger_filename (str, optional): The filename for the logger. Defaults to 'debug/ultragpt.log'.
             log_extra_info (bool, optional): Whether to include extra info in logs. Defaults to False.
             log_to_file (bool, optional): Whether to log to a file. Defaults to False.
+            log_to_console (bool, optional): Whether to log to console. Defaults to True.
             log_level (str, optional): The logging level. Defaults to 'DEBUG'.
         Raises:
             ValueError: If an invalid tool is provided.
@@ -61,14 +62,14 @@ class UltraGPT:
             include_extra_info=log_extra_info,
             write_to_file=log_to_file,
             log_level=log_level,
-            log_to_console=False  # Always disable console logging
+            log_to_console = True if verbose else log_to_console
         )
         
         self.log.info("Initializing UltraGPT")
         if self.verbose:
-            p.blue("="*50)
-            p.blue("Initializing UltraGPT")
-            p.blue("="*50)
+            self.log.debug("=" * 50)
+            self.log.debug("Initializing UltraGPT")
+            self.log.debug("=" * 50)
 
     def chat_with_openai_sync(
         self,
@@ -99,19 +100,19 @@ class UltraGPT:
             Verbose: Optionally logs detailed steps of the request and response process.
         """
         try:
-            self.log.debug("Sending request to OpenAI (msgs: %d)", len(messages))
+            self.log.debug("Sending request to OpenAI (msgs: " + str(len(messages)) + ")")
             if self.verbose:
-                p.cyan(f"\nOpenAI Request → Messages: {len(messages)}")
-                p.yellow("Checking for tool needs...")
+                self.log.debug("OpenAI Request → Messages: " + str(len(messages)))
+                self.log.debug("Checking for tool needs...")
             
             tool_response = self.execute_tools(message=messages[-1]["content"], history=messages, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
             if tool_response:
                 if self.verbose:
-                    p.cyan("\nAppending tool responses to message")
+                    self.log.debug("Appending tool responses to message")
                 tool_response = "Tool Responses:\n" + tool_response
                 messages = self.append_message_to_system(messages, tool_response)
             elif self.verbose:
-                p.dgray("\nNo tool responses needed")
+                self.log.debug("No tool responses needed")
             
             response = self.openai_client.chat.completions.create(
                 model=model,
@@ -121,14 +122,14 @@ class UltraGPT:
             )
             content = response.choices[0].message.content.strip()
             tokens = response.usage.total_tokens
-            self.log.debug("Response received (tokens: %d)", tokens)
+            self.log.debug("Response received (tokens: " + str(tokens) + ")")
             if self.verbose:
-                p.green(f"✓ Response received ({tokens} tokens)")
+                self.log.debug("✓ Response received (" + str(tokens) + " tokens)")
             return content, tokens
         except Exception as e:
-            self.log.error("OpenAI sync request failed: %s", str(e))
+            self.log.error("OpenAI sync request failed: " + str(e))
             if self.verbose:
-                p.red(f"✗ OpenAI request failed: {str(e)}")
+                self.log.debug("✗ OpenAI request failed: " + str(e))
             raise e
 
     def chat_with_model_parse(
@@ -177,10 +178,10 @@ class UltraGPT:
                 content = content.model_dump(by_alias=True)
             tokens = response.usage.total_tokens
             
-            self.log.debug("Parse response received (tokens: %d)", tokens)
+            self.log.debug("Parse response received (tokens: " + str(tokens) + ")")
             return content, tokens
         except Exception as e:
-            self.log.error("Parse request failed: %s", str(e))
+            self.log.error("Parse request failed: " + str(e))
             raise e
 
     def analyze_tool_need(self, message: str, available_tools: list) -> dict:
@@ -239,9 +240,9 @@ class UltraGPT:
         active_model = steps_model if steps_model else model
         
         if self.verbose:
-            p.purple("➤ Starting Steps Pipeline")
+            self.log.debug("➤ Starting Steps Pipeline")
             if steps_model:
-                p.cyan(f"Using steps model: {steps_model}")
+                self.log.debug("Using steps model: " + steps_model)
         else:
             self.log.info("Starting steps pipeline")
         total_tokens = 0
@@ -253,22 +254,22 @@ class UltraGPT:
         total_tokens += tokens
         steps = steps_json.get("steps", [])
         if self.verbose:
-            p.yellow(f"Generated {len(steps)} steps:")
+            self.log.debug("Generated " + str(len(steps)) + " steps:")
             for idx, step in enumerate(steps, 1):
-                p.lgray(f"  {idx}. {step}")
+                self.log.debug("  " + str(idx) + ". " + step)
         else:
-            self.log.debug("Generated %d steps", len(steps))
+            self.log.debug("Generated " + str(len(steps)) + " steps")
 
         memory = []
 
         for idx, step in enumerate(steps, 1):
             if self.verbose:
-                p.cyan(f"Processing step {idx}/{len(steps)}")
-            self.log.debug("Processing step %d/%d", idx, len(steps))
+                self.log.debug("Processing step " + str(idx) + "/" + str(len(steps)))
+            self.log.debug("Processing step " + str(idx) + "/" + str(len(steps)))
             step_prompt = each_step_prompt(memory, step)
             step_message = messages + [{"role": "system", "content": step_prompt}]
             step_response, tokens = self.chat_with_openai_sync(step_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
-            self.log.debug("Step %d response: %s...", idx, step_response[:100])
+            self.log.debug("Step " + str(idx) + " response: " + step_response[:100] + "...")
             total_tokens += tokens
             memory.append(
                 {
@@ -284,7 +285,7 @@ class UltraGPT:
         total_tokens += tokens
 
         if self.verbose:
-            p.green("✓ Steps pipeline completed")
+            self.log.debug("✓ Steps pipeline completed")
         
         return {
             "steps": memory,
@@ -307,19 +308,19 @@ class UltraGPT:
         active_model = reasoning_model if reasoning_model else model
         
         if self.verbose:
-            p.purple(f"➤ Starting Reasoning Pipeline ({reasoning_iterations} iterations)")
+            self.log.debug("➤ Starting Reasoning Pipeline (" + str(reasoning_iterations) + " iterations)")
             if reasoning_model:
-                p.cyan(f"Using reasoning model: {reasoning_model}")
+                self.log.debug("Using reasoning model: " + reasoning_model)
         else:
-            self.log.info("Starting reasoning pipeline (%d iterations)", reasoning_iterations)
+            self.log.info("Starting reasoning pipeline (" + str(reasoning_iterations) + " iterations)")
         total_tokens = 0
         all_thoughts = []
         messages = self.turnoff_system_message(messages)
 
         for iteration in range(reasoning_iterations):
             if self.verbose:
-                p.yellow(f"Iteration {iteration + 1}/{reasoning_iterations}")
-            self.log.debug("Iteration %d/%d", iteration + 1, reasoning_iterations)
+                self.log.debug("Iteration " + str(iteration + 1) + "/" + str(reasoning_iterations))
+            self.log.debug("Iteration " + str(iteration + 1) + "/" + str(reasoning_iterations))
             # Generate new thoughts based on all previous thoughts
             reasoning_message = messages + [
                 {"role": "system", "content": generate_reasoning_prompt(all_thoughts)}
@@ -341,11 +342,11 @@ class UltraGPT:
             all_thoughts.extend(new_thoughts)
             
             if self.verbose:
-                p.cyan(f"Generated {len(new_thoughts)} thoughts:")
+                self.log.debug("Generated " + str(len(new_thoughts)) + " thoughts:")
                 for idx, thought in enumerate(new_thoughts, 1):
-                    p.lgray(f"  {idx}. {thought}")
+                    self.log.debug("  " + str(idx) + ". " + thought)
             else:
-                self.log.debug("Generated %d new thoughts", len(new_thoughts))
+                self.log.debug("Generated " + str(len(new_thoughts)) + " new thoughts")
 
         return all_thoughts, total_tokens
     
@@ -407,13 +408,13 @@ class UltraGPT:
                 - details_dict (dict): A dictionary with detailed information about the session.
         """
         if self.verbose:
-            p.blue("="*50)
-            p.blue("Starting Chat Session")
-            p.cyan(f"Messages: {len(messages)}")
-            p.cyan(f"Schema: {schema}")
-            p.cyan(f"Model: {model}")
-            p.cyan(f"Tools: {', '.join(tools) if tools else 'None'}")
-            p.blue("="*50)
+            self.log.debug("=" * 50)
+            self.log.debug("Starting Chat Session")
+            self.log.debug("Messages: " + str(len(messages)))
+            self.log.debug("Schema: " + str(schema))
+            self.log.debug("Model: " + model)
+            self.log.debug("Tools: " + (', '.join(tools) if tools else 'None'))
+            self.log.debug("=" * 50)
         else:
             self.log.info("Starting chat session")
 
@@ -467,16 +468,16 @@ class UltraGPT:
         }
         total_tokens = reasoning_tokens + steps_tokens + tokens
         if self.verbose:
-            p.blue("="*50)
-            p.green("✓ Chat Session Completed")
-            p.yellow("Tokens Used:")
-            p.lgray(f"  - Reasoning: {reasoning_tokens}")
-            p.lgray(f"  - Steps: {steps_tokens}")
-            p.lgray(f"  - Final: {tokens}")
-            p.lgray(f"  - Total: {total_tokens}")
-            p.blue("="*50)
+            self.log.debug("=" * 50)
+            self.log.debug("✓ Chat Session Completed")
+            self.log.debug("Tokens Used:")
+            self.log.debug("  - Reasoning: " + str(reasoning_tokens))
+            self.log.debug("  - Steps: " + str(steps_tokens))
+            self.log.debug("  - Final: " + str(tokens))
+            self.log.debug("  - Total: " + str(total_tokens))
+            self.log.debug("=" * 50)
         else:
-            self.log.info("Chat completed (total tokens: %d)", total_tokens)
+            self.log.info("Chat completed (total tokens: " + str(total_tokens) + ")")
         
         #! Return as tuple for consistent API 
         #! DO NOT CHANGE THIS RETURN FORMAT
@@ -486,9 +487,9 @@ class UltraGPT:
     def execute_tool(self, tool: str, message: str, history: list, tools_config: dict) -> dict:
         """Execute a single tool and return its response"""
         try:
-            self.log.debug("Executing tool: %s", tool)
+            self.log.debug("Executing tool: " + tool)
             if self.verbose:
-                p.cyan(f"\nExecuting tool: {tool}")
+                self.log.debug("Executing tool: " + tool)
                 
             if tool == "web-search":
                 # Merge Google credentials with config, allowing override
@@ -510,18 +511,18 @@ class UltraGPT:
                     if not self.google_api_key or not web_search_config.get("search_engine_id"):
                         self.log.warning("Web search skipped: Missing Google API credentials")
                         if self.verbose:
-                            p.yellow("⚠ Web search skipped: Missing Google API credentials")
+                            self.log.debug("⚠ Web search skipped: Missing Google API credentials")
                     else:
                         self.log.warning("Web search returned no results (quota/API error)")
                         if self.verbose:
-                            p.yellow("⚠ Web search returned no results (quota/API error)")
+                            self.log.debug("⚠ Web search returned no results (quota/API error)")
                 
-                self.log.debug("Tool %s completed successfully", tool)
+                self.log.debug("Tool " + tool + " completed successfully")
                 if self.verbose:
-                    p.green(f"✓ {tool} returned response:")
-                    p.lgray("-" * 40)
-                    p.lgray(response if response else "(empty - no results)")
-                    p.lgray("-" * 40)
+                    self.log.debug("✓ " + tool + " returned response:")
+                    self.log.debug("-" * 40)
+                    self.log.debug(response if response else "(empty - no results)")
+                    self.log.debug("-" * 40)
                 return {
                     "tool": tool,
                     "response": response
@@ -533,12 +534,12 @@ class UltraGPT:
                     self.openai_client, 
                     tools_config.get("calculator", {})
                 )
-                self.log.debug("Tool %s completed successfully", tool)
+                self.log.debug("Tool " + tool + " completed successfully")
                 if self.verbose:
-                    p.green(f"✓ {tool} returned response:")
-                    p.lgray("-" * 40)
-                    p.lgray(response)
-                    p.lgray("-" * 40)
+                    self.log.debug("✓ " + tool + " returned response:")
+                    self.log.debug("-" * 40)
+                    self.log.debug(response)
+                    self.log.debug("-" * 40)
                 return {
                     "tool": tool,
                     "response": response
@@ -550,27 +551,27 @@ class UltraGPT:
                     self.openai_client, 
                     tools_config.get("math-operations", {})
                 )
-                self.log.debug("Tool %s completed successfully", tool)
+                self.log.debug("Tool " + tool + " completed successfully")
                 if self.verbose:
-                    p.green(f"✓ {tool} returned response:")
-                    p.lgray("-" * 40)
-                    p.lgray(response)
-                    p.lgray("-" * 40)
+                    self.log.debug("✓ " + tool + " returned response:")
+                    self.log.debug("-" * 40)
+                    self.log.debug(response)
+                    self.log.debug("-" * 40)
                 return {
                     "tool": tool,
                     "response": response
                 }
             # Add other tool conditions here
             if self.verbose:
-                p.yellow(f"! Tool {tool} not implemented")
+                self.log.debug("! Tool " + tool + " not implemented")
             return {
                 "tool": tool,
                 "response": ""
             }
         except Exception as e:
-            self.log.error("Tool %s failed: %s", tool, str(e))
+            self.log.error("Tool " + tool + " failed: " + str(e))
             if self.verbose:
-                p.red(f"\n✗ Tool {tool} failed: {str(e)}")
+                self.log.debug("✗ Tool " + tool + " failed: " + str(e))
             return {
                 "tool": tool,
                 "response": f"Tool {tool} failed: {str(e)}"
@@ -597,18 +598,18 @@ class UltraGPT:
         
         try:
             total_tools = len(tools)
-            self.log.info("Executing %d tools in batches of %d", total_tools, tool_batch_size)
+            self.log.info("Executing " + str(total_tools) + " tools in batches of " + str(tool_batch_size))
             if self.verbose:
-                p.purple(f"\n➤ Executing {total_tools} tools in batches of {tool_batch_size}")
-                p.yellow("Query: " + message[:100] + "..." if len(message) > 100 else message)
-                p.lgray("-" * 40)
+                self.log.debug("➤ Executing " + str(total_tools) + " tools in batches of " + str(tool_batch_size))
+                self.log.debug("Query: " + (message[:100] + "..." if len(message) > 100 else message))
+                self.log.debug("-" * 40)
             
             all_responses = []
             success_count = 0
             
             for batch_idx, tool_batch in enumerate(self.batch_tools(tools, tool_batch_size), 1):
                 if self.verbose:
-                    p.yellow(f"\nProcessing batch {batch_idx}...")
+                    self.log.debug("Processing batch " + str(batch_idx) + "...")
                 batch_responses = []
                 
                 with ThreadPoolExecutor(max_workers=min(len(tool_batch), tool_max_workers)) as executor:
@@ -626,45 +627,45 @@ class UltraGPT:
                                 success_count += 1
                         except Exception as e:
                             if self.verbose:
-                                p.red(f"✗ Tool {tool} failed: {str(e)}")
+                                self.log.debug("✗ Tool " + tool + " failed: " + str(e))
                             else:
-                                self.log.error("Tool %s failed: %s", tool, str(e))
+                                self.log.error("Tool " + tool + " failed: " + str(e))
                 
                 all_responses.extend(batch_responses)
                 if self.verbose:
-                    p.green(f"✓ Batch {batch_idx}: {len(batch_responses)}/{len(tool_batch)} tools completed\n")
+                    self.log.debug("✓ Batch " + str(batch_idx) + ": " + str(len(batch_responses)) + "/" + str(len(tool_batch)) + " tools completed")
 
-            self.log.info("Tools execution completed (%d/%d successful)", success_count, total_tools)
+            self.log.info("Tools execution completed (" + str(success_count) + "/" + str(total_tools) + " successful)")
             if self.verbose:
-                p.green(f"\n✓ Tools execution completed ({success_count}/{total_tools} successful)")
+                self.log.debug("✓ Tools execution completed (" + str(success_count) + "/" + str(total_tools) + " successful)")
                 
             if not all_responses:
                 if self.verbose:
-                    p.yellow("\nNo tool responses generated")
+                    self.log.debug("No tool responses generated")
                 return ""
                 
             if self.verbose:
-                p.cyan("\nFormatted Tool Responses:")
-                p.lgray("=" * 40)
+                self.log.debug("Formatted Tool Responses:")
+                self.log.debug("=" * 40)
                 
             formatted_responses = []
             for r in all_responses:
                 tool_name = r['tool'].upper()
                 response = r['response'].strip()
-                formatted = f"[{tool_name}]\n{response}"
+                formatted = "[" + tool_name + "]\n" + response
                 formatted_responses.append(formatted)
                 if self.verbose:
-                    p.lgray(formatted)
-                    p.lgray("-" * 40)
+                    self.log.debug(formatted)
+                    self.log.debug("-" * 40)
                 
             if self.verbose:
-                p.lgray("=" * 40 + "\n")
+                self.log.debug("=" * 40)
                 
             return "\n\n".join(formatted_responses)
         except Exception as e:
-            self.log.error("Tool execution failed: %s", str(e))
+            self.log.error("Tool execution failed: " + str(e))
             if self.verbose:
-                p.red(f"✗ Tool execution failed: {str(e)}")
+                self.log.debug("✗ Tool execution failed: " + str(e))
             return ""
 
     #! Tool Call Functionality --------------------------------------------
@@ -729,19 +730,19 @@ class UltraGPT:
                 - total_tokens (int): The total number of tokens used during the session.
         """
         if self.verbose:
-            p.blue("="*50)
-            p.blue("Starting UltraGPT Tool Call Mode")
-            p.blue("="*50)
+            self.log.debug("=" * 50)
+            self.log.debug("Starting UltraGPT Tool Call Mode")
+            self.log.debug("=" * 50)
             tool_names = []
             for tool in user_tools:
                 if isinstance(tool, dict):
                     tool_names.append(tool.get('name', 'Unknown'))
                 else:
                     tool_names.append(getattr(tool, 'name', 'Unknown'))
-            p.cyan(f"User Tools: {tool_names}")
-            p.cyan(f"Allow Multiple: {allow_multiple}")
+            self.log.debug("User Tools: " + str(tool_names))
+            self.log.debug("Allow Multiple: " + str(allow_multiple))
         else:
-            self.log.info("Starting tool call mode with %d user tools", len(user_tools))
+            self.log.info("Starting tool call mode with " + str(len(user_tools)) + " user tools")
         
         # Validate user tools
         validated_tools = self._validate_user_tools(user_tools)
@@ -793,9 +794,9 @@ class UltraGPT:
                         steps_output = result
                         steps_tokens = tokens
                 except Exception as e:
-                    self.log.error("Pipeline %s failed: %s", name, str(e))
+                    self.log.error("Pipeline " + name + " failed: " + str(e))
                     if self.verbose:
-                        p.red(f"✗ {name.title()} pipeline failed: {str(e)}")
+                        self.log.debug("✗ " + name.title() + " pipeline failed: " + str(e))
 
         # Combine pipeline outputs for enhanced tool decision making
         conclusion = steps_output.get("conclusion", "")
@@ -822,17 +823,17 @@ class UltraGPT:
         total_tokens = reasoning_tokens + steps_tokens + tokens
         
         if self.verbose:
-            p.green("✓ Tool call analysis completed")
+            self.log.debug("✓ Tool call analysis completed")
             if allow_multiple:
-                p.cyan(f"Generated {len(tool_call_response.get('tool_calls', []))} tool calls")
+                self.log.debug("Generated " + str(len(tool_call_response.get('tool_calls', []))) + " tool calls")
                 for i, tool_call in enumerate(tool_call_response.get('tool_calls', []), 1):
-                    p.yellow(f"  {i}. {tool_call.get('tool_name')} - {tool_call.get('reasoning')}")
+                    self.log.debug("  " + str(i) + ". " + tool_call.get('tool_name') + " - " + tool_call.get('reasoning'))
             else:
                 tool_call = tool_call_response.get('tool_call', {})
-                p.yellow(f"Selected tool: {tool_call.get('tool_name')} - {tool_call.get('reasoning')}")
-            p.blue(f"Total tokens used: {total_tokens}")
+                self.log.debug("Selected tool: " + tool_call.get('tool_name') + " - " + tool_call.get('reasoning'))
+            self.log.debug("Total tokens used: " + str(total_tokens))
         else:
-            self.log.info("Tool call completed with %d tokens", total_tokens)
+            self.log.info("Tool call completed with " + str(total_tokens) + " tokens")
         
         return tool_call_response, total_tokens
 
@@ -848,16 +849,16 @@ class UltraGPT:
                     validated_tools.append(tool)
                 else:
                     missing = [field for field in required_fields if field not in tool]
-                    self.log.warning("Tool missing required fields: %s", missing)
+                    self.log.warning("Tool missing required fields: " + str(missing))
                     if self.verbose:
-                        p.yellow(f"⚠ Tool missing fields: {missing}")
+                        self.log.debug("⚠ Tool missing fields: " + str(missing))
             elif hasattr(tool, 'model_dump'):
                 # Pydantic model
                 validated_tools.append(tool.model_dump())
             else:
-                self.log.warning("Invalid tool format: %s", type(tool))
+                self.log.warning("Invalid tool format: " + str(type(tool)))
                 if self.verbose:
-                    p.yellow(f"⚠ Invalid tool format: {type(tool)}")
+                    self.log.debug("⚠ Invalid tool format: " + str(type(tool)))
         
         return validated_tools
     
