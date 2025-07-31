@@ -175,12 +175,17 @@ Instructions:
 - Generate the exact parameters needed for each tool call based on the user's request
 - {multiple_instruction}
 - If no tools are needed, return an empty list
-- Always provide clear reasoning for why you chose each tool and parameters
 
 For each tool call, you must:
 1. Identify the most appropriate tool for the task
 2. Extract or generate the exact parameters needed from the user's request
-3. Provide clear reasoning for your choice
+3. Provide clear, user-friendly reasoning that explains how you'll help them accomplish their goal
+
+IMPORTANT: Your reasoning should be written as if you're a helpful assistant talking directly to the user. 
+- Don't mention technical tool names or parameter details
+- Focus on explaining how you'll help them achieve their goal
+- Sound natural and conversational
+- Example: "I'll help you send that email to John with your project update" instead of "The 'send_email' tool is appropriate with parameters recipient, subject, body"
 
 Your response must be in the specified JSON format with tool calls and reasoning."""
 

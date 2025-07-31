@@ -224,6 +224,46 @@ class UltraGPT:
                 processed.append(message)
         return processed
     
+    def integrate_tool_call_prompt(self, messages: list, tool_prompt: str) -> list:
+        """
+        Properly integrate tool call prompt with existing system/developer messages
+        Places all conversation messages first, then the system message at the end
+        """
+        processed = []
+        system_messages = []
+        other_messages = []
+        
+        # Separate system/developer messages from other messages
+        for message in messages:
+            if message["role"] in ["system", "developer"]:
+                system_messages.append(message)
+            else:
+                other_messages.append(message)
+        
+        # Add all conversation messages first
+        processed.extend(other_messages)
+        
+        # Then add the system message at the end
+        if system_messages:
+            # Combine all existing system messages
+            combined_content = "\n\n".join([msg["content"] for msg in system_messages])
+            # Add our tool call prompt
+            final_content = f"{combined_content}\n\n{tool_prompt}"
+            
+            # Use the role of the first system message
+            processed.append({
+                "role": system_messages[0]["role"],
+                "content": final_content
+            })
+        else:
+            # No existing system messages, just add our tool prompt at the end
+            processed.append({
+                "role": "system",
+                "content": tool_prompt
+            })
+        
+        return processed
+    
     #! Pipelines -----------------------------------------------------------
     def run_steps_pipeline(
         self,
@@ -756,8 +796,8 @@ class UltraGPT:
         else:
             tool_prompt = generate_single_tool_call_prompt(validated_tools)
         
-        # Add tool call prompt to messages
-        tool_call_messages = messages + [{"role": "system", "content": tool_prompt}]
+        # Properly integrate tool call prompt with existing system messages
+        tool_call_messages = self.integrate_tool_call_prompt(messages, tool_prompt)
         
         # Use UltraGPT's execution layer to analyze and determine tool calls
         reasoning_output = []
