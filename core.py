@@ -890,10 +890,13 @@ class UltraGPT:
             param_model = create_model(param_model_name, **param_fields)
             
             # Create the tool call model
+            from pydantic import Field
+            from typing import Literal
+            
             tool_call_fields = {
-                'tool_name': (str, tool_name),
-                'parameters': (param_model, ...),
-                'reasoning': (str, ...)
+                'tool_name': (Literal[tool_name], Field(default=tool_name, description=f"Must be exactly '{tool_name}'")),
+                'parameters': (param_model, Field(..., description=f"Parameters for {tool_name} tool")),
+                'reasoning': (str, Field(..., description="Reasoning for choosing this tool"))
             }
             
             tool_call_model_name = f"{tool_name.title().replace('_', '')}ToolCall"
