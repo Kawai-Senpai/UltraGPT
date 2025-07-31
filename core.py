@@ -415,18 +415,18 @@ class UltraGPT:
         self,
         messages: list,
         schema=None,
-        model: str = "gpt-4o",  # Format: "provider:model" or just "model" (defaults to OpenAI)
+        model: str = "gpt-4.1",  # Format: "provider:model" or just "model" (defaults to OpenAI)
         temperature: float = 0.7,
         reasoning_iterations: int = 3,
         steps_pipeline: bool = True,
         reasoning_pipeline: bool = True,
-        steps_model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)
-        reasoning_model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)
+        steps_model: str = "gpt-4.1-nano",  # Format: "provider:model" or just "model" (defaults to OpenAI)
+        reasoning_model: str = "gpt-4.1-nano",  # Format: "provider:model" or just "model" (defaults to OpenAI)
         tools: list = ["web-search", "calculator", "math-operations"],
         tools_config: dict = {
             "web-search": {
                 "max_results": 5, 
-                "model": "gpt-4o",  # Can be "openai:gpt-4o" or "claude:claude-3-sonnet-20240229"
+                "model": "gpt-4.1-nano",  # Can be "openai:gpt-4o" or "claude:claude-3-sonnet-20240229"
                 "enable_scraping": True,  # Enable web scraping of search results
                 "max_scrape_length": 5000,  # Max characters per scraped page
                 "scrape_timeout": 15,  # Timeout for scraping requests
@@ -434,11 +434,11 @@ class UltraGPT:
                 "max_history_items": 5  # Max conversation history items to include
             },
             "calculator": {
-                "model": "gpt-4o",  # Can be "openai:gpt-4o" or "claude:claude-3-sonnet-20240229"
+                "model": "gpt-4.1-nano",  # Can be "openai:gpt-4o" or "claude:claude-3-sonnet-20240229"
                 "max_history_items": 5  # Max conversation history items to include
             },
             "math-operations": {
-                "model": "gpt-4o",  # Can be "openai:gpt-4o" or "claude:claude-3-sonnet-20240229"
+                "model": "gpt-4.1-nano",  # Can be "openai:gpt-4o" or "claude:claude-3-sonnet-20240229"
                 "max_history_items": 5  # Max conversation history items to include
             }
         },
@@ -739,18 +739,18 @@ class UltraGPT:
         messages: list,
         user_tools: list,
         allow_multiple: bool = True,
-        model: str = "gpt-4o",  # Format: "provider:model" or just "model" (defaults to OpenAI)
+        model: str = "gpt-4.1",  # Format: "provider:model" or just "model" (defaults to OpenAI)
         temperature: float = 0.7,
         reasoning_iterations: int = 3,
         steps_pipeline: bool = True,
         reasoning_pipeline: bool = True,
-        steps_model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)  
-        reasoning_model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)
+        steps_model: str = "gpt-4.1-nano",  # Format: "provider:model" or just "model" (defaults to OpenAI)  
+        reasoning_model: str = 'gpt-4.1-nano',  # Format: "provider:model" or just "model" (defaults to OpenAI)
         tools: list = ["web-search", "calculator", "math-operations"],
         tools_config: dict = {
             "web-search": {
                 "max_results": 5, 
-                "model": "gpt-4o",
+                "model": "gpt-4.1-nano",
                 "enable_scraping": True,
                 "max_scrape_length": 5000,
                 "scrape_timeout": 15,
@@ -758,11 +758,11 @@ class UltraGPT:
                 "max_history_items": 5
             },
             "calculator": {
-                "model": "gpt-4o",
+                "model": "gpt-4.1-nano",
                 "max_history_items": 5
             },
             "math-operations": {
-                "model": "gpt-4o",
+                "model": "gpt-4.1-nano",
                 "max_history_items": 5
             }
         },
