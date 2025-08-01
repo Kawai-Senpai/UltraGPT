@@ -17,14 +17,14 @@ class BaseProvider:
     def __init__(self, api_key: str, **kwargs):
         self.api_key = api_key
         
-    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: int = 4096) -> tuple:
+    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096) -> tuple:
         """
         Standard chat completion
         Returns: (content: str, tokens: int)
         """
         raise NotImplementedError
         
-    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: int = 4096) -> tuple:
+    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = 4096) -> tuple:
         """
         Chat completion with structured output
         Returns: (parsed_content: dict, tokens: int)
@@ -46,28 +46,38 @@ class OpenAIProvider(BaseProvider):
         super().__init__(api_key, **kwargs)
         self.client = OpenAI(api_key=api_key)
         
-    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: int = 4096) -> tuple:
+    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096) -> tuple:
         """Standard OpenAI chat completion"""
-        response = self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            stream=False,
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "temperature": temperature
+        }
+        
+        # Only add max_tokens if it's not None
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+            
+        response = self.client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content.strip()
         tokens = response.usage.total_tokens
         return content, tokens
         
-    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: int = 4096) -> tuple:
+    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = 4096) -> tuple:
         """OpenAI structured output with schema"""
-        response = self.client.beta.chat.completions.parse(
-            model=model,
-            messages=messages,
-            response_format=schema,
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "response_format": schema,
+            "temperature": temperature
+        }
+        
+        # Only add max_tokens if it's not None
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+            
+        response = self.client.beta.chat.completions.parse(**kwargs)
         content = response.choices[0].message.parsed
         if isinstance(content, BaseModel):
             content = content.model_dump(by_alias=True)
@@ -121,16 +131,19 @@ class ClaudeProvider(BaseProvider):
         system_prompt = "\n\n".join(system_parts) if system_parts else None
         return converted_messages, system_prompt
         
-    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: int = 4096) -> tuple:
+    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096) -> tuple:
         """Claude chat completion"""
         converted_messages, system_prompt = self.convert_messages(messages)
         
         kwargs = {
             "model": model,
             "messages": converted_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
+            "temperature": temperature
         }
+        
+        # Only add max_tokens if it's not None
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
         
         if system_prompt:
             kwargs["system"] = system_prompt
@@ -140,7 +153,7 @@ class ClaudeProvider(BaseProvider):
         tokens = response.usage.input_tokens + response.usage.output_tokens
         return content, tokens
         
-    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: int = 4096) -> tuple:
+    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = 4096) -> tuple:
         """
         Claude structured output with schema using tool-based approach
         
@@ -171,10 +184,13 @@ class ClaudeProvider(BaseProvider):
             "model": model,
             "messages": converted_messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
             "tools": [tool],
             "tool_choice": {"type": "tool", "name": tool_name}  # Force using the tool
         }
+        
+        # Only add max_tokens if it's not None
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
         
         if system_prompt:
             kwargs["system"] = system_prompt
@@ -235,13 +251,13 @@ class ProviderManager:
             # Default to openai if no provider specified
             return "openai", model
             
-    def chat_completion(self, model: str, messages: List[Dict], temperature: float = 0.7, max_tokens: int = 4096) -> tuple:
+    def chat_completion(self, model: str, messages: List[Dict], temperature: float = 0.7, max_tokens: Optional[int] = 4096) -> tuple:
         """Route chat completion to appropriate provider"""
         provider_name, model_name = self.parse_model_string(model)
         provider = self.get_provider(provider_name)
         return provider.chat_completion(messages, model_name, temperature, max_tokens)
         
-    def chat_completion_with_schema(self, model: str, messages: List[Dict], schema: BaseModel, temperature: float = 0.7, max_tokens: int = 4096) -> tuple:
+    def chat_completion_with_schema(self, model: str, messages: List[Dict], schema: BaseModel, temperature: float = 0.7, max_tokens: Optional[int] = 4096) -> tuple:
         """Route structured chat completion to appropriate provider"""
         provider_name, model_name = self.parse_model_string(model)
         provider = self.get_provider(provider_name)

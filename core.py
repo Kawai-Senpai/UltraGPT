@@ -11,6 +11,7 @@ from .schemas import Steps, Reasoning, ToolAnalysisSchema, ToolCallResponse, Sin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ultraprint.logging import logger
 from .providers import ProviderManager, OpenAIProvider, ClaudeProvider
+from typing import Optional
 
 from .tools.web_search.main import _execute as web_search
 from .tools.calculator.main import _execute as calculator
@@ -26,6 +27,7 @@ class UltraGPT:
         claude_api_key: str = None,
         google_api_key: str = None,
         search_engine_id: str = None,
+        max_tokens: Optional[int] = 4096,
         verbose: bool = False,
         logger_name: str = 'ultragpt',
         logger_filename: str = 'debug/ultragpt.log',
@@ -41,6 +43,7 @@ class UltraGPT:
             claude_api_key (str, optional): The API key for accessing Claude/Anthropic service.
             google_api_key (str, optional): Google Custom Search API key for web search tool.
             search_engine_id (str, optional): Google Custom Search Engine ID for web search tool.
+            max_tokens (int, optional): Maximum number of tokens to generate. Set to None to use provider defaults. Defaults to 4096.
             verbose (bool, optional): Whether to enable verbose logging. Defaults to False.
             logger_name (str, optional): The name of the logger. Defaults to 'ultragpt'.
             logger_filename (str, optional): The filename for the logger. Defaults to 'debug/ultragpt.log'.
@@ -80,6 +83,9 @@ class UltraGPT:
         self.google_api_key = google_api_key
         self.search_engine_id = search_engine_id
         
+        # Store max_tokens setting
+        self.max_tokens = max_tokens
+        
         self.verbose = verbose
         self.log = logger(
             name=logger_name,
@@ -104,7 +110,8 @@ class UltraGPT:
         tools: list,
         tools_config: dict,
         tool_batch_size: int,
-        tool_max_workers: int
+        tool_max_workers: int,
+        max_tokens: Optional[int] = None
     ):
         """
         Sends a synchronous chat request to the specified AI provider and processes the response.
@@ -143,7 +150,8 @@ class UltraGPT:
             content, tokens = self.provider_manager.chat_completion(
                 model=model,
                 messages=messages,
-                temperature=temperature
+                temperature=temperature,
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens
             )
             
             self.log.debug("Response received (tokens: " + str(tokens) + ")")
@@ -165,7 +173,8 @@ class UltraGPT:
         tools: list = [],
         tools_config: dict = {},
         tool_batch_size: int = 3,
-        tool_max_workers: int = 10
+        tool_max_workers: int = 10,
+        max_tokens: Optional[int] = None
     ):
         """
         Sends a chat message to the model for parsing and returns the parsed response.
@@ -195,7 +204,8 @@ class UltraGPT:
                 model=model,
                 messages=messages,
                 schema=schema,
-                temperature=temperature
+                temperature=temperature,
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens
             )
             
             self.log.debug("Parse response received (tokens: " + str(tokens) + ")")
@@ -417,6 +427,7 @@ class UltraGPT:
         schema=None,
         model: str = "gpt-4.1",  # Format: "provider:model" or just "model" (defaults to OpenAI)
         temperature: float = 0.7,
+        max_tokens: Optional[int] = None,  # Override instance default if provided
         reasoning_iterations: int = 3,
         steps_pipeline: bool = True,
         reasoning_pipeline: bool = True,
@@ -452,6 +463,7 @@ class UltraGPT:
             schema (optional): A schema to parse the final output, defaults to None.
             model (str, optional): The model to use. Format: "provider:model" (e.g., "claude:claude-3-sonnet-20240229") or just "model" (defaults to OpenAI). Defaults to "gpt-4o".
             temperature (float, optional): The temperature for the model's output. Defaults to 0.7.
+            max_tokens (int, optional): Maximum tokens to generate. Overrides instance default if provided. None uses provider defaults.
             reasoning_iterations (int, optional): The number of reasoning iterations. Defaults to 3.
             steps_pipeline (bool, optional): Whether to use steps pipeline. Defaults to True.
             reasoning_pipeline (bool, optional): Whether to use reasoning pipeline. Defaults to True.
@@ -517,9 +529,9 @@ class UltraGPT:
             messages = self.add_message_before_system(messages, {"role": "user", "content": prompt})
 
         if schema:
-            final_output, tokens = self.chat_with_model_parse(messages, schema=schema, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+            final_output, tokens = self.chat_with_model_parse(messages, schema=schema, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers, max_tokens=max_tokens)
         else:
-            final_output, tokens = self.chat_with_ai_sync(messages, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+            final_output, tokens = self.chat_with_ai_sync(messages, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers, max_tokens=max_tokens)
 
         if steps:
             steps.append(conclusion)
