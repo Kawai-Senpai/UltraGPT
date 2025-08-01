@@ -304,7 +304,8 @@ class UltraGPT:
         tools_config: dict,
         tool_batch_size: int,
         tool_max_workers: int,
-        steps_model: str = None
+        steps_model: str = None,
+        max_tokens: Optional[int] = None
     ):
         # Use steps_model if provided, otherwise use main model
         active_model = steps_model if steps_model else model
@@ -320,7 +321,7 @@ class UltraGPT:
         messages = self.turnoff_system_message(messages)
         steps_generator_message = messages + [{"role": "system", "content": generate_steps_prompt()}]
 
-        steps_json, tokens = self.chat_with_model_parse(steps_generator_message, schema=Steps, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+        steps_json, tokens = self.chat_with_model_parse(steps_generator_message, schema=Steps, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers, max_tokens=max_tokens)
         total_tokens += tokens
         steps = steps_json.get("steps", [])
         if self.verbose:
@@ -338,7 +339,7 @@ class UltraGPT:
             self.log.debug("Processing step " + str(idx) + "/" + str(len(steps)))
             step_prompt = each_step_prompt(memory, step)
             step_message = messages + [{"role": "system", "content": step_prompt}]
-            step_response, tokens = self.chat_with_ai_sync(step_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+            step_response, tokens = self.chat_with_ai_sync(step_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers, max_tokens=max_tokens)
             self.log.debug("Step " + str(idx) + " response: " + step_response[:100] + "...")
             total_tokens += tokens
             memory.append(
@@ -351,7 +352,7 @@ class UltraGPT:
         # Generate final conclusion
         conclusion_prompt = generate_conclusion_prompt(memory)
         conclusion_message = messages + [{"role": "system", "content": conclusion_prompt}]
-        conclusion, tokens = self.chat_with_ai_sync(conclusion_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+        conclusion, tokens = self.chat_with_ai_sync(conclusion_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers, max_tokens=max_tokens)
         total_tokens += tokens
 
         if self.verbose:
@@ -372,7 +373,8 @@ class UltraGPT:
         tools_config: dict,
         tool_batch_size: int,
         tool_max_workers: int,
-        reasoning_model: str = None
+        reasoning_model: str = None,
+        max_tokens: Optional[int] = None
     ):
         # Use reasoning_model if provided, otherwise use main model
         active_model = reasoning_model if reasoning_model else model
@@ -404,7 +406,8 @@ class UltraGPT:
                 tools=tools,
                 tools_config=tools_config,
                 tool_batch_size=tool_batch_size,
-                tool_max_workers=tool_max_workers
+                tool_max_workers=tool_max_workers,
+                max_tokens=max_tokens
             )
             total_tokens += tokens
             
@@ -506,13 +509,13 @@ class UltraGPT:
             if reasoning_pipeline:
                 futures.append({
                     "type": "reasoning",
-                    "future": executor.submit(self.run_reasoning_pipeline, messages, model, temperature, reasoning_iterations, tools, tools_config, tool_batch_size, tool_max_workers, reasoning_model)
+                    "future": executor.submit(self.run_reasoning_pipeline, messages, model, temperature, reasoning_iterations, tools, tools_config, tool_batch_size, tool_max_workers, reasoning_model, max_tokens)
                 })
             
             if steps_pipeline:
                 futures.append({
                     "type": "steps",
-                    "future": executor.submit(self.run_steps_pipeline, messages, model, temperature, tools, tools_config, tool_batch_size, tool_max_workers, steps_model)
+                    "future": executor.submit(self.run_steps_pipeline, messages, model, temperature, tools, tools_config, tool_batch_size, tool_max_workers, steps_model, max_tokens)
                 })
 
             for future in futures:
@@ -780,6 +783,7 @@ class UltraGPT:
         },
         tool_batch_size: int = 3,
         tool_max_workers: int = 10,
+        max_tokens: Optional[int] = None
     ):
         """
         Tool call functionality that uses UltraGPT's execution layer to determine 
@@ -800,11 +804,13 @@ class UltraGPT:
             tools_config (dict, optional): The configuration for internal tools.
             tool_batch_size (int, optional): The batch size for tool processing. Defaults to 3.
             tool_max_workers (int, optional): The maximum number of workers for tool processing. Defaults to 10.
+            max_tokens (Optional[int], optional): Maximum number of tokens to generate. If None, uses instance default or provider default. Defaults to None.
         
         Returns:
-            tuple: A tuple containing the tool call response and total tokens used.
+            tuple: A tuple containing the tool call response, total tokens used, and details dictionary.
                 - tool_call_response: The tool calls with parameters and reasoning.
                 - total_tokens (int): The total number of tokens used during the session.
+                - details_dict (dict): Dictionary containing reasoning output, steps, token breakdown, and tool call response.
         """
         if self.verbose:
             self.log.debug("=" * 50)
@@ -849,7 +855,7 @@ class UltraGPT:
                 future = executor.submit(
                     self.run_reasoning_pipeline,
                     tool_call_messages, model, temperature, reasoning_iterations,
-                    tools, tools_config, tool_batch_size, tool_max_workers, reasoning_model
+                    tools, tools_config, tool_batch_size, tool_max_workers, reasoning_model, max_tokens
                 )
                 futures.append(("reasoning", future))
             
@@ -857,7 +863,7 @@ class UltraGPT:
                 future = executor.submit(
                     self.run_steps_pipeline,
                     tool_call_messages, model, temperature,
-                    tools, tools_config, tool_batch_size, tool_max_workers, steps_model
+                    tools, tools_config, tool_batch_size, tool_max_workers, steps_model, max_tokens
                 )
                 futures.append(("steps", future))
             
@@ -894,10 +900,22 @@ class UltraGPT:
             tools=tools,
             tools_config=tools_config,
             tool_batch_size=tool_batch_size,
-            tool_max_workers=tool_max_workers
+            tool_max_workers=tool_max_workers,
+            max_tokens=max_tokens
         )
 
         total_tokens = reasoning_tokens + steps_tokens + tokens
+        
+        # Create details_dict similar to chat method for consistency
+        details_dict = {
+            "reasoning": reasoning_output,
+            "steps": steps_output.get("steps", []),
+            "conclusion": steps_output.get("conclusion", ""),
+            "reasoning_tokens": reasoning_tokens,
+            "steps_tokens": steps_tokens,
+            "final_tokens": tokens,
+            "tool_call_response": tool_call_response
+        }
         
         if self.verbose:
             self.log.debug("✓ Tool call analysis completed")
@@ -912,7 +930,7 @@ class UltraGPT:
         else:
             self.log.info("Tool call completed with " + str(total_tokens) + " tokens")
         
-        return tool_call_response, total_tokens
+        return tool_call_response, total_tokens, details_dict
 
     def _validate_user_tools(self, user_tools: list) -> list:
         """Validate and format user tools (both UserTool and ExpertTool)"""
