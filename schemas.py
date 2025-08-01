@@ -44,3 +44,10 @@ class UserTool(BaseModel):
             return v
         else:
             raise ValueError("parameters_schema must be either a Pydantic BaseModel class or a dict")
+
+class ExpertTool(UserTool):
+    """Extended UserTool for expert systems with additional metadata"""
+    expert_category: str
+    prerequisites: Optional[List[str]] = None
+    
+    # ExpertTool inherits all validation from UserTool including parameters_schema

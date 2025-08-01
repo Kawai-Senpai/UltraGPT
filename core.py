@@ -7,7 +7,7 @@ make_tool_analysis_prompt, generate_tool_call_prompt,
 generate_single_tool_call_prompt, generate_multiple_tool_call_prompt
 )
 from pydantic import BaseModel
-from .schemas import Steps, Reasoning, ToolAnalysisSchema, ToolCallResponse, SingleToolCallResponse, UserTool
+from .schemas import Steps, Reasoning, ToolAnalysisSchema, ToolCallResponse, SingleToolCallResponse, UserTool, ExpertTool
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ultraprint.logging import logger
 from .providers import ProviderManager, OpenAIProvider, ClaudeProvider
@@ -903,12 +903,12 @@ class UltraGPT:
         return tool_call_response, total_tokens
 
     def _validate_user_tools(self, user_tools: list) -> list:
-        """Validate and format user tools"""
+        """Validate and format user tools (both UserTool and ExpertTool)"""
         validated_tools = []
         
         for tool in user_tools:
             if isinstance(tool, dict):
-                # Ensure all required fields are present
+                # Ensure all required fields are present for UserTool
                 required_fields = ['name', 'description', 'parameters_schema', 'usage_guide', 'when_to_use']
                 if all(field in tool for field in required_fields):
                     validated_tools.append(tool)
@@ -918,7 +918,7 @@ class UltraGPT:
                     if self.verbose:
                         self.log.debug("⚠ Tool missing fields: " + str(missing))
             elif hasattr(tool, 'model_dump'):
-                # Pydantic model
+                # Pydantic model (UserTool or ExpertTool)
                 validated_tools.append(tool.model_dump())
             else:
                 self.log.warning("Invalid tool format: " + str(type(tool)))
