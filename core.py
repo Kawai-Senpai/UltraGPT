@@ -1074,8 +1074,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
             "conclusion": steps_output.get("conclusion", ""),
             "reasoning_tokens": reasoning_tokens,
             "steps_tokens": steps_tokens,
-            "final_tokens": tokens,
-            "tool_call_response": tool_call_response
+            "final_tokens": tokens
         }
         
         if self.verbose:
@@ -1092,7 +1091,19 @@ IMPORTANT TOOL USAGE GUIDELINES:
         else:
             self.log.info("Tool call completed with " + str(total_tokens) + " tokens")
         
-        return tool_call_response, total_tokens, details_dict
+        # Simplify response format - remove role and content, return only tool_calls
+        if tool_call_response.get('tool_calls'):
+            if allow_multiple:
+                # Return all tool_calls as array for multiple tools
+                simplified_response = tool_call_response.get('tool_calls')
+            else:
+                # Return only first tool_call (not in array) for single tool
+                simplified_response = tool_call_response.get('tool_calls')[0]
+        else:
+            # Fallback for non-tool responses (shouldn't happen with native tool calling)
+            simplified_response = tool_call_response
+        
+        return simplified_response, total_tokens, details_dict
 
     def _validate_user_tools(self, user_tools: list) -> list:
         """Validate and format user tools (both UserTool and ExpertTool)"""

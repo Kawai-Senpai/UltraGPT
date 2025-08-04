@@ -311,11 +311,27 @@ class ClaudeProvider(BaseProvider):
         """Claude native tool calling - always requires at least one tool to be called"""
         converted_messages, system_prompt = self.convert_messages(messages)
         
+        # Convert OpenAI-format tools to Claude format
+        claude_tools = []
+        for tool in tools:
+            if tool.get("type") == "function":
+                # Convert from OpenAI format to Claude format
+                function_def = tool["function"]
+                claude_tool = {
+                    "name": function_def["name"],
+                    "description": function_def["description"],
+                    "input_schema": function_def["parameters"]
+                }
+                claude_tools.append(claude_tool)
+            else:
+                # Already in Claude format or unknown format
+                claude_tools.append(tool)
+        
         kwargs = {
             "model": model,
             "messages": converted_messages,
             "temperature": temperature,
-            "tools": tools,
+            "tools": claude_tools,  # Use converted Claude tools
             "tool_choice": {"type": "any"}  # Always require the AI to choose at least one tool
         }
         
