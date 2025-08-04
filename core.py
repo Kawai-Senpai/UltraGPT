@@ -1100,8 +1100,12 @@ IMPORTANT TOOL USAGE GUIDELINES:
                 # Return only first tool_call (not in array) for single tool
                 simplified_response = tool_call_response.get('tool_calls')[0]
         else:
-            # Fallback for non-tool responses (shouldn't happen with native tool calling)
-            simplified_response = tool_call_response
+            # For non-tool responses, only return content if it's not null or empty
+            content = tool_call_response.get('content')
+            if content and content.strip():
+                simplified_response = {"content": content}
+            else:
+                simplified_response = None
         
         return simplified_response, total_tokens, details_dict
 
