@@ -31,6 +31,18 @@ class BaseProvider:
         """
         raise NotImplementedError
         
+    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None) -> tuple:
+        """
+        Chat completion with native tool calling
+        Returns: (response_message: dict, tokens: int)
+        Response message contains either content or tool_calls
+        Args:
+            parallel_tool_calls: For OpenAI - whether to allow parallel tool calls (None = default behavior)
+                                 For Claude - converted to disable_parallel_tool_use internally
+        Note: AI will always be required to choose at least one tool from the provided tools
+        """
+        raise NotImplementedError
+        
     def convert_messages(self, messages: List[Dict]) -> tuple:
         """
         Convert OpenAI format messages to provider-specific format
@@ -83,6 +95,49 @@ class OpenAIProvider(BaseProvider):
             content = content.model_dump(by_alias=True)
         tokens = response.usage.total_tokens
         return content, tokens
+        
+    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None) -> tuple:
+        """OpenAI native tool calling - always requires at least one tool to be called"""
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "temperature": temperature,
+            "tool_choice": "required"  # Always require the AI to choose at least one tool
+        }
+        
+        # Only add max_tokens if it's not None
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+            
+        # Add parallel_tool_calls if specified (OpenAI specific)
+        if parallel_tool_calls is not None:
+            kwargs["parallel_tool_calls"] = parallel_tool_calls
+            
+        response = self.client.chat.completions.create(**kwargs)
+        response_message = response.choices[0].message
+        
+        # Convert to dict format for consistency
+        message_dict = {
+            "role": "assistant",
+            "content": response_message.content
+        }
+        
+        # Add tool_calls if present
+        if response_message.tool_calls:
+            message_dict["tool_calls"] = []
+            for tool_call in response_message.tool_calls:
+                message_dict["tool_calls"].append({
+                    "id": tool_call.id,
+                    "type": tool_call.type,
+                    "function": {
+                        "name": tool_call.function.name,
+                        "arguments": tool_call.function.arguments
+                    }
+                })
+        
+        tokens = response.usage.total_tokens
+        return message_dict, tokens
 
 
 class ClaudeProvider(BaseProvider):
@@ -100,6 +155,7 @@ class ClaudeProvider(BaseProvider):
         - Extract system messages to separate system prompt
         - Ensure alternating user/assistant pattern
         - Convert content format if needed
+        - Handle tool messages properly
         """
         system_parts = []
         converted_messages = []
@@ -116,11 +172,41 @@ class ClaudeProvider(BaseProvider):
                     "content": content
                 })
             elif role == "assistant":
-                converted_messages.append({
+                assistant_msg = {
                     "role": "assistant", 
-                    "content": content
-                })
-            # Skip tool/function messages for now - would need special handling
+                    "content": content or ""
+                }
+                # Handle tool calls in assistant messages
+                if "tool_calls" in msg and msg["tool_calls"]:
+                    assistant_msg["content"] = []
+                    if content:
+                        assistant_msg["content"].append({
+                            "type": "text",
+                            "text": content
+                        })
+                    
+                    for tool_call in msg["tool_calls"]:
+                        assistant_msg["content"].append({
+                            "type": "tool_use",
+                            "id": tool_call["id"],
+                            "name": tool_call["function"]["name"],
+                            "input": json.loads(tool_call["function"]["arguments"])
+                        })
+                
+                converted_messages.append(assistant_msg)
+            elif role == "tool":
+                # Convert tool response to Claude format
+                tool_result_msg = {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": msg.get("tool_call_id"),
+                            "content": content
+                        }
+                    ]
+                }
+                converted_messages.append(tool_result_msg)
             
         # Ensure we end with a user message (Claude requirement)
         if converted_messages and converted_messages[-1]["role"] != "user":
@@ -220,6 +306,66 @@ class ClaudeProvider(BaseProvider):
             
         tokens = response.usage.input_tokens + response.usage.output_tokens
         return content, tokens
+        
+    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None) -> tuple:
+        """Claude native tool calling - always requires at least one tool to be called"""
+        converted_messages, system_prompt = self.convert_messages(messages)
+        
+        kwargs = {
+            "model": model,
+            "messages": converted_messages,
+            "temperature": temperature,
+            "tools": tools,
+            "tool_choice": {"type": "any"}  # Always require the AI to choose at least one tool
+        }
+        
+        # Only add max_tokens if it's not None
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        
+        # Handle parallel tool calls (Claude uses disable_parallel_tool_use)
+        if parallel_tool_calls is not None:
+            kwargs["tool_choice"]["disable_parallel_tool_use"] = not parallel_tool_calls
+        
+        if system_prompt:
+            kwargs["system"] = system_prompt
+            
+        response = self.client.messages.create(**kwargs)
+        
+        # Convert Claude response to standardized format
+        message_dict = {
+            "role": "assistant",
+            "content": None
+        }
+        
+        # Extract text content and tool uses
+        text_content = ""
+        tool_uses = []
+        
+        for block in response.content:
+            if hasattr(block, 'type'):
+                if block.type == "text":
+                    text_content += block.text
+                elif block.type == "tool_use":
+                    tool_uses.append({
+                        "id": block.id,
+                        "type": "function",
+                        "function": {
+                            "name": block.name,
+                            "arguments": json.dumps(block.input)
+                        }
+                    })
+        
+        # Set content (Claude can return text even with tool calls)
+        if text_content.strip():
+            message_dict["content"] = text_content.strip()
+        
+        # Add tool_calls if present
+        if tool_uses:
+            message_dict["tool_calls"] = tool_uses
+        
+        tokens = response.usage.input_tokens + response.usage.output_tokens
+        return message_dict, tokens
 
 
 class ProviderManager:
@@ -262,3 +408,9 @@ class ProviderManager:
         provider_name, model_name = self.parse_model_string(model)
         provider = self.get_provider(provider_name)
         return provider.chat_completion_with_schema(messages, schema, model_name, temperature, max_tokens)
+        
+    def chat_completion_with_tools(self, model: str, messages: List[Dict], tools: List[Dict], temperature: float = 0.7, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None) -> tuple:
+        """Route tool calling to appropriate provider - always requires at least one tool to be called"""
+        provider_name, model_name = self.parse_model_string(model)
+        provider = self.get_provider(provider_name)
+        return provider.chat_completion_with_tools(messages, tools, model_name, temperature, max_tokens, parallel_tool_calls)

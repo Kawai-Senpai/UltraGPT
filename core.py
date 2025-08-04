@@ -7,7 +7,7 @@ make_tool_analysis_prompt, generate_tool_call_prompt,
 generate_single_tool_call_prompt, generate_multiple_tool_call_prompt
 )
 from pydantic import BaseModel
-from .schemas import Steps, Reasoning, ToolAnalysisSchema, ToolCallResponse, SingleToolCallResponse, UserTool, ExpertTool
+from .schemas import Steps, Reasoning, ToolAnalysisSchema, UserTool, ExpertTool
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ultraprint.logging import logger
 from .providers import ProviderManager, OpenAIProvider, ClaudeProvider
@@ -213,6 +213,167 @@ class UltraGPT:
         except Exception as e:
             self.log.error("Parse request failed: " + str(e))
             raise e
+
+    def chat_with_model_tools(
+        self,
+        messages: list,
+        user_tools: list,
+        model: str = "gpt-4o",
+        temperature: float = 0.7,
+        tools: list = [],
+        tools_config: dict = {},
+        tool_batch_size: int = 3,
+        tool_max_workers: int = 10,
+        max_tokens: Optional[int] = None,
+        parallel_tool_calls: Optional[bool] = None
+    ):
+        """
+        Sends a chat message to the model with native tool calling support.
+        AI will always be required to choose at least one tool from the provided tools.
+        """
+        try:
+            self.log.debug("Sending native tool calling request")
+            
+            # Execute UltraGPT tools if any
+            tool_response = self.execute_tools(
+                message=messages[-1]["content"], 
+                history=messages, 
+                tools=tools, 
+                tools_config=tools_config, 
+                tool_batch_size=tool_batch_size, 
+                tool_max_workers=tool_max_workers
+            )
+            if tool_response:
+                tool_response = "Tool Responses:\n" + tool_response
+                messages = self.append_message_to_system(messages, tool_response)
+            
+            # Convert user tools to native tool format
+            native_tools = self._convert_user_tools_to_native_format(user_tools)
+            
+            # Add tool usage instructions to the messages if tools are available
+            if user_tools and len(user_tools) > 0:
+                # Generate tool prompts for available tools to help the model understand them better
+                tool_prompts = []
+                for tool in user_tools:
+                    if isinstance(tool, dict):
+                        name = tool.get("name", "unknown")
+                        description = tool.get("description", "No description")
+                    elif hasattr(tool, 'model_dump'):
+                        tool_dict = tool.model_dump()
+                        name = tool_dict.get("name", "unknown")
+                        description = tool_dict.get("description", "No description")
+                    else:
+                        name = str(tool)
+                        description = "Tool"
+                    
+                    tool_prompts.append(f"- {name}: {description}")
+                
+                # Add tool usage instructions to the message
+                tool_instructions = f"""
+Available tools:
+{chr(10).join(tool_prompts)}
+
+IMPORTANT TOOL USAGE GUIDELINES:
+- Every tool call MUST include 'reasoning' parameter: Provide detailed reasoning for why this specific tool was chosen and how it will help solve the user's request
+- Every tool call MUST include 'stop_after_tool_call' parameter: Set to true if the task will be complete after this tool call OR if user input is needed, false if you plan to call more tools afterward
+- Always think step by step and use tools strategically to solve the user's request
+- When using tools, provide meaningful reasoning that explains your decision-making process
+- Use stop_after_tool_call=true when: task is complete, you need user feedback, or the result requires user review
+- Use stop_after_tool_call=false when: you plan to use the tool result for additional tool calls to complete the task
+
+"""
+                
+                # Make a copy of messages to avoid modifying the original
+                messages = messages.copy()
+                if isinstance(messages[-1], dict) and messages[-1]["role"] == "user":
+                    messages[-1] = messages[-1].copy()
+                    messages[-1]["content"] = tool_instructions + messages[-1]["content"]
+                else:
+                    messages.append({"role": "system", "content": tool_instructions})
+            
+            # Make native tool call - AI will always choose at least one tool
+            response_message, tokens = self.provider_manager.chat_completion_with_tools(
+                model=model,
+                messages=messages,
+                tools=native_tools,
+                temperature=temperature,
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+                parallel_tool_calls=parallel_tool_calls
+            )
+            
+            self.log.debug("Native tool calling response received (tokens: " + str(tokens) + ")")
+            return response_message, tokens
+        except Exception as e:
+            self.log.error("Native tool calling request failed: " + str(e))
+            raise e
+
+    def _convert_user_tools_to_native_format(self, user_tools: list) -> list:
+        """Convert UserTool objects to native AI provider tool format"""
+        native_tools = []
+        
+        for tool in user_tools:
+            if isinstance(tool, dict):
+                tool_dict = tool
+            elif hasattr(tool, 'model_dump'):
+                tool_dict = tool.model_dump()
+            else:
+                self.log.warning("Invalid tool format: " + str(type(tool)))
+                continue
+            
+            # Get parameters schema and ensure it has additionalProperties: false for OpenAI strict mode
+            parameters_schema = tool_dict["parameters_schema"].copy()
+            
+            # Surgically add reasoning and stop_after_tool_call parameters to the schema
+            if "properties" not in parameters_schema:
+                parameters_schema["properties"] = {}
+            
+            # Add reasoning parameter
+            parameters_schema["properties"]["reasoning"] = {
+                "type": "string",
+                "description": "Detailed reasoning for why this tool was chosen and how it will help solve the user's request"
+            }
+            
+            # Add stop_after_tool_call parameter  
+            parameters_schema["properties"]["stop_after_tool_call"] = {
+                "type": "boolean",
+                "description": "Whether to stop execution after this tool call (true if task is complete or user input needed, false to continue with more tools)"
+            }
+            
+            # Ensure additionalProperties is false and required includes all properties for OpenAI strict mode
+            def ensure_openai_strict_compliance(schema):
+                if isinstance(schema, dict):
+                    if schema.get("type") == "object":
+                        schema["additionalProperties"] = False
+                        # For OpenAI strict mode, required must include ALL properties if any are specified
+                        if "properties" in schema:
+                            all_properties = list(schema["properties"].keys())
+                            schema["required"] = all_properties
+                    
+                    for key, value in schema.items():
+                        if key == "properties" and isinstance(value, dict):
+                            for prop_value in value.values():
+                                ensure_openai_strict_compliance(prop_value)
+                        elif isinstance(value, dict):
+                            ensure_openai_strict_compliance(value)
+                        elif isinstance(value, list):
+                            for item in value:
+                                ensure_openai_strict_compliance(item)
+            
+            ensure_openai_strict_compliance(parameters_schema)
+            
+            # Convert to OpenAI function calling format (Claude will handle conversion)
+            native_tool = {
+                "type": "function",
+                "function": {
+                    "name": tool_dict["name"],
+                    "description": tool_dict["description"],
+                    "parameters": parameters_schema,
+                    "strict": True
+                }
+            }
+            native_tools.append(native_tool)
+        
+        return native_tools
 
     def analyze_tool_need(self, message: str, available_tools: list) -> dict:
         """Analyze if a tool is needed for the message"""
@@ -830,9 +991,6 @@ class UltraGPT:
         # Validate user tools
         validated_tools = self._validate_user_tools(user_tools)
         
-        # Create dynamic schemas based on user tools
-        dynamic_schema = self._create_dynamic_tool_schema(validated_tools, allow_multiple)
-        
         # Create tool call prompt
         if allow_multiple:
             tool_prompt = generate_multiple_tool_call_prompt(validated_tools)
@@ -883,7 +1041,6 @@ class UltraGPT:
 
         # Combine pipeline outputs for enhanced tool decision making
         conclusion = steps_output.get("conclusion", "")
-        steps = steps_output.get("steps", [])
 
         if reasoning_pipeline or steps_pipeline:
             combined_prompt = combine_all_pipeline_prompts(reasoning_output, conclusion)
@@ -891,17 +1048,21 @@ class UltraGPT:
         else:
             enhanced_messages = tool_call_messages
 
-        # Generate tool call response using structured output
-        tool_call_response, tokens = self.chat_with_model_parse(
+        # Generate tool call response using native tool calling
+        # AI will always choose at least one tool - parallel_tool_calls controls how many
+        parallel_calls = allow_multiple  # Simple: allow_multiple directly controls parallel calls
+        
+        tool_call_response, tokens = self.chat_with_model_tools(
             enhanced_messages, 
-            schema=dynamic_schema, 
+            user_tools=validated_tools,
             model=model, 
             temperature=temperature,
             tools=tools,
             tools_config=tools_config,
             tool_batch_size=tool_batch_size,
             tool_max_workers=tool_max_workers,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            parallel_tool_calls=parallel_calls
         )
 
         total_tokens = reasoning_tokens + steps_tokens + tokens
@@ -919,13 +1080,14 @@ class UltraGPT:
         
         if self.verbose:
             self.log.debug("✓ Tool call analysis completed")
-            if allow_multiple:
+            # Handle native tool calling response format
+            if tool_call_response.get('tool_calls'):
                 self.log.debug("Generated " + str(len(tool_call_response.get('tool_calls', []))) + " tool calls")
                 for i, tool_call in enumerate(tool_call_response.get('tool_calls', []), 1):
-                    self.log.debug("  " + str(i) + ". " + tool_call.get('tool_name') + " - " + tool_call.get('reasoning'))
-            else:
-                tool_call = tool_call_response.get('tool_call', {})
-                self.log.debug("Selected tool: " + tool_call.get('tool_name') + " - " + tool_call.get('reasoning'))
+                    tool_name = tool_call.get('function', {}).get('name', 'Unknown')
+                    self.log.debug("  " + str(i) + ". " + tool_name)
+            elif tool_call_response.get('content'):
+                self.log.debug("AI response without tool calls: " + str(tool_call_response.get('content', ''))[:100] + "...")
             self.log.debug("Total tokens used: " + str(total_tokens))
         else:
             self.log.info("Tool call completed with " + str(total_tokens) + " tokens")
@@ -956,89 +1118,3 @@ class UltraGPT:
                     self.log.debug("⚠ Invalid tool format: " + str(type(tool)))
         
         return validated_tools
-    
-    def _create_dynamic_tool_schema(self, validated_tools: list, allow_multiple: bool):
-        """Create dynamic Pydantic schema based on user tools"""
-        from pydantic import create_model
-        from typing import Any, Dict
-        
-        # Create individual tool call models for each tool
-        tool_models = {}
-        
-        for tool in validated_tools:
-            tool_name = tool['name']
-            tool_schema = tool['parameters_schema']
-            
-            # Create dynamic model for this specific tool's parameters
-            param_fields = {}
-            for prop_name, prop_def in tool_schema.get('properties', {}).items():
-                python_type = self._convert_json_schema_to_python_type(prop_def)
-                is_required = prop_name in tool_schema.get('required', [])
-                
-                if is_required:
-                    param_fields[prop_name] = (python_type, ...)
-                else:
-                    default_value = prop_def.get('default', None)
-                    param_fields[prop_name] = (python_type, default_value)
-            
-            # Create the parameter model
-            param_model_name = f"{tool_name.title().replace('_', '')}Params"
-            param_model = create_model(param_model_name, **param_fields)
-            
-            # Create the tool call model
-            from pydantic import Field
-            from typing import Literal
-            
-            tool_call_fields = {
-                'tool_name': (Literal[tool_name], Field(default=tool_name, description=f"Must be exactly '{tool_name}'")),
-                'parameters': (param_model, Field(..., description=f"Parameters for {tool_name} tool")),
-                'reasoning': (str, Field(..., description="Reasoning for choosing this tool"))
-            }
-            
-            tool_call_model_name = f"{tool_name.title().replace('_', '')}ToolCall"
-            tool_models[tool_name] = create_model(tool_call_model_name, **tool_call_fields)
-        
-        if allow_multiple:
-            # For multiple tools, create a response with a list of any tool call
-            if len(tool_models) == 1:
-                tool_type = list(tool_models.values())[0]
-            else:
-                from typing import Union
-                tool_type = Union[tuple(tool_models.values())]
-            
-            response_fields = {
-                'tool_calls': (list[tool_type], ...)
-            }
-            return create_model('DynamicMultipleToolCallResponse', **response_fields)
-        else:
-            # For single tool, create a response with one tool call
-            if len(tool_models) == 1:
-                tool_type = list(tool_models.values())[0]
-            else:
-                from typing import Union
-                tool_type = Union[tuple(tool_models.values())]
-            
-            response_fields = {
-                'tool_call': (tool_type, ...)
-            }
-            return create_model('DynamicSingleToolCallResponse', **response_fields)
-    
-    def _convert_json_schema_to_python_type(self, schema_def):
-        """Convert JSON schema type to Python type"""
-        schema_type = schema_def.get('type', 'string')
-        
-        if schema_type == 'string':
-            return str
-        elif schema_type == 'integer':
-            return int
-        elif schema_type == 'number':
-            return float
-        elif schema_type == 'boolean':
-            return bool
-        elif schema_type == 'array':
-            items_type = self._convert_json_schema_to_python_type(schema_def.get('items', {'type': 'string'}))
-            return list[items_type]
-        elif schema_type == 'object':
-            return dict
-        else:
-            return str  # Default to string

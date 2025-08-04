@@ -174,7 +174,7 @@ Instructions:
 - Use your reasoning capabilities to determine which tool(s) would be most appropriate
 - Generate the exact parameters needed for each tool call based on the user's request
 - {multiple_instruction}
-- If no tools are needed, return an empty list
+- If no further tools are needed after this, use the 'stop_after_tool_call' tool to indicate no action is required after calling a tool.
 
 For each tool call, you must:
 1. Identify the most appropriate tool for the task

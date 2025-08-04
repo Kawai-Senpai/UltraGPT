@@ -10,23 +10,6 @@ class Reasoning(BaseModel):
 class ToolAnalysisSchema(BaseModel):
     tools: List[str]
 
-class ToolCall(BaseModel):
-    """
-    Base ToolCall schema. In actual use, dynamic schemas are created with:
-    - tool_name: str
-    - parameters: <DynamicParameterModel> (based on user's parameter schema)
-    - reasoning: str
-    """
-    tool_name: str
-    reasoning: str
-    # Note: 'parameters' field is added dynamically based on user tool schemas
-
-class ToolCallResponse(BaseModel):
-    tool_calls: List[ToolCall]
-
-class SingleToolCallResponse(BaseModel):
-    tool_call: ToolCall
-
 class UserTool(BaseModel):
     name: str
     description: str
@@ -51,3 +34,27 @@ class ExpertTool(UserTool):
     prerequisites: Optional[List[str]] = None
     
     # ExpertTool inherits all validation from UserTool including parameters_schema
+
+# Schemas for native tool calling responses
+class FunctionCall(BaseModel):
+    """Function call within a tool call"""
+    name: str
+    arguments: str  # JSON string
+
+class NativeToolCall(BaseModel):
+    """Native tool call from AI providers"""
+    id: str
+    type: str  # "function"
+    function: FunctionCall
+
+class NativeToolCallMessage(BaseModel):
+    """Message containing native tool calls"""
+    role: str  # "assistant"
+    content: Optional[str] = None
+    tool_calls: Optional[List[NativeToolCall]] = None
+
+class ToolResult(BaseModel):
+    """Result from executing a tool"""
+    tool_call_id: str
+    content: str
+    error: Optional[str] = None
