@@ -38,7 +38,7 @@ class BaseProvider:
         Response message contains either content or tool_calls
         Args:
             parallel_tool_calls: For OpenAI - whether to allow parallel tool calls (None = default behavior)
-                                 For Claude - converted to disable_parallel_tool_use internally
+                                    For Claude - converted to disable_parallel_tool_use internally
         Note: AI will always be required to choose at least one tool from the provided tools
         """
         raise NotImplementedError
@@ -56,6 +56,7 @@ class OpenAIProvider(BaseProvider):
     
     # Model name prefixes that don't support temperature parameter
     NO_TEMPERATURE_MODELS = ["o1", "o2", "o3", "o4", "gpt-5"]
+    NO_MAX_TOKENS_MODELS = ["o1", "o2", "o3", "o4", "gpt-5"]
     
     def __init__(self, api_key: str, **kwargs):
         super().__init__(api_key, **kwargs)
@@ -64,6 +65,10 @@ class OpenAIProvider(BaseProvider):
     def _should_include_temperature(self, model: str) -> bool:
         """Check if model supports temperature parameter"""
         return not any(prefix in model for prefix in self.NO_TEMPERATURE_MODELS)
+
+    def _should_include_max_tokens(self, model: str) -> bool:
+        """Check if model supports max_tokens parameter"""
+        return not any(prefix in model for prefix in self.NO_MAX_TOKENS_MODELS)
         
     def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096) -> tuple:
         """Standard OpenAI chat completion"""
@@ -78,7 +83,7 @@ class OpenAIProvider(BaseProvider):
             kwargs["temperature"] = temperature
         
         # Only add max_tokens if it's not None
-        if max_tokens is not None:
+        if max_tokens is not None and self._should_include_max_tokens(model):
             kwargs["max_tokens"] = max_tokens
             
         response = self.client.chat.completions.create(**kwargs)
