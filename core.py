@@ -11,6 +11,7 @@ from .schemas import Steps, Reasoning, ToolAnalysisSchema, UserTool, ExpertTool
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ultraprint.logging import logger
 from .providers import ProviderManager, OpenAIProvider, ClaudeProvider
+from .tools_manager import ToolManager
 from typing import Optional
 import os
 import importlib
@@ -101,6 +102,9 @@ class UltraGPT:
             self.log.debug("=" * 50)
             self.log.debug("Initializing UltraGPT")
             self.log.debug("=" * 50)
+        
+        # Initialize ToolManager
+        self.tool_manager = ToolManager(self)
 
     def chat_with_ai_sync(
         self,
@@ -109,8 +113,6 @@ class UltraGPT:
         temperature: float,
         tools: list,
         tools_config: dict,
-        tool_batch_size: int,
-        tool_max_workers: int,
         max_tokens: Optional[int] = None
     ):
         """
@@ -121,8 +123,6 @@ class UltraGPT:
             temperature (float): The temperature for the model's output.
             tools (list): The list of tools to enable.
             tools_config (dict): The configuration for the tools.
-            tool_batch_size (int): The batch size for tool processing.
-            tool_max_workers (int): The maximum number of workers for tool processing.
         Returns:
             tuple: A tuple containing the response content (str) and the total number of tokens used (int).
         Raises:
@@ -138,7 +138,7 @@ class UltraGPT:
                 self.log.debug(f"AI Request → Provider: {provider_name}, Model: {model_name}, Messages: " + str(len(messages)))
                 self.log.debug("Checking for tool needs...")
             
-            tool_response = self.execute_tools(message=messages[-1]["content"], history=messages, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+            tool_response = self.execute_tools(message=messages[-1]["content"], history=messages, tools=tools, tools_config=tools_config)
             if tool_response:
                 if self.verbose:
                     self.log.debug("Appending tool responses to message")
@@ -172,8 +172,6 @@ class UltraGPT:
         temperature: float = None,
         tools: list = [],
         tools_config: dict = {},
-        tool_batch_size: int = None,
-        tool_max_workers: int = None,
         max_tokens: Optional[int] = None
     ):
         """
@@ -185,8 +183,6 @@ class UltraGPT:
             temperature (float): The temperature for the model's output.
             tools (list): The list of tools to enable.
             tools_config (dict): The configuration for the tools.
-            tool_batch_size (int): The batch size for tool processing.
-            tool_max_workers (int): The maximum number of workers for tool processing.
         Returns:
             tuple: A tuple containing the parsed content and the total number of tokens used.
         Raises:
@@ -195,12 +191,10 @@ class UltraGPT:
         # Use config defaults if not provided
         model = model or config.DEFAULT_PARSE_MODEL
         temperature = temperature if temperature is not None else config.DEFAULT_TEMPERATURE
-        tool_batch_size = tool_batch_size or config.DEFAULT_TOOL_BATCH_SIZE
-        tool_max_workers = tool_max_workers or config.DEFAULT_TOOL_MAX_WORKERS
         try:
             self.log.debug("Sending parse request with schema: %s", schema)
             
-            tool_response = self.execute_tools(message=messages[-1]["content"], history=messages, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers)
+            tool_response = self.execute_tools(message=messages[-1]["content"], history=messages, tools=tools, tools_config=tools_config)
             if tool_response:
                 tool_response = "Tool Responses:\n" + tool_response
             messages = self.append_message_to_system(messages, tool_response)
@@ -227,8 +221,6 @@ class UltraGPT:
         temperature: float = None,
         tools: list = [],
         tools_config: dict = {},
-        tool_batch_size: int = None,
-        tool_max_workers: int = None,
         max_tokens: Optional[int] = None,
         parallel_tool_calls: Optional[bool] = None
     ):
@@ -244,9 +236,7 @@ class UltraGPT:
                 message=messages[-1]["content"], 
                 history=messages, 
                 tools=tools, 
-                tools_config=tools_config, 
-                tool_batch_size=tool_batch_size, 
-                tool_max_workers=tool_max_workers
+                tools_config=tools_config
             )
             if tool_response:
                 tool_response = "Tool Responses:\n" + tool_response
@@ -460,8 +450,6 @@ IMPORTANT TOOL USAGE GUIDELINES:
         temperature: float,
         tools: list,
         tools_config: dict,
-        tool_batch_size: int,
-        tool_max_workers: int,
         steps_model: str = None,
         max_tokens: Optional[int] = None
     ):
@@ -479,7 +467,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
         messages = self.turnoff_system_message(messages)
         steps_generator_message = messages + [{"role": "system", "content": generate_steps_prompt()}]
 
-        steps_json, tokens = self.chat_with_model_parse(steps_generator_message, schema=Steps, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers, max_tokens=max_tokens)
+        steps_json, tokens = self.chat_with_model_parse(steps_generator_message, schema=Steps, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens)
         total_tokens += tokens
         steps = steps_json.get("steps", [])
         if self.verbose:
@@ -497,7 +485,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
             self.log.debug("Processing step " + str(idx) + "/" + str(len(steps)))
             step_prompt = each_step_prompt(memory, step)
             step_message = messages + [{"role": "system", "content": step_prompt}]
-            step_response, tokens = self.chat_with_ai_sync(step_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers, max_tokens=max_tokens)
+            step_response, tokens = self.chat_with_ai_sync(step_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens)
             self.log.debug("Step " + str(idx) + " response: " + step_response[:100] + "...")
             total_tokens += tokens
             memory.append(
@@ -510,7 +498,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
         # Generate final conclusion
         conclusion_prompt = generate_conclusion_prompt(memory)
         conclusion_message = messages + [{"role": "system", "content": conclusion_prompt}]
-        conclusion, tokens = self.chat_with_ai_sync(conclusion_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers, max_tokens=max_tokens)
+        conclusion, tokens = self.chat_with_ai_sync(conclusion_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens)
         total_tokens += tokens
 
         if self.verbose:
@@ -529,8 +517,6 @@ IMPORTANT TOOL USAGE GUIDELINES:
         reasoning_iterations: int,
         tools: list,
         tools_config: dict,
-        tool_batch_size: int,
-        tool_max_workers: int,
         reasoning_model: str = None,
         max_tokens: Optional[int] = None
     ):
@@ -563,8 +549,6 @@ IMPORTANT TOOL USAGE GUIDELINES:
                 temperature=temperature,
                 tools=tools,
                 tools_config=tools_config,
-                tool_batch_size=tool_batch_size,
-                tool_max_workers=tool_max_workers,
                 max_tokens=max_tokens
             )
             total_tokens += tokens
@@ -596,8 +580,6 @@ IMPORTANT TOOL USAGE GUIDELINES:
         reasoning_model: str = None,
         tools: list = None,
         tools_config: dict = None,
-        tool_batch_size: int = None,
-        tool_max_workers: int = None,
     ):
         """
         Initiates a chat session with the given messages and optional schema.
@@ -614,8 +596,6 @@ IMPORTANT TOOL USAGE GUIDELINES:
             reasoning_model (str, optional): Specific model for reasoning pipeline. Format: "provider:model" or just "model". Uses main model if None.
             tools (list, optional): The list of tools to enable. Defaults to ["web-search", "calculator", "math-operations"].
             tools_config (dict, optional): The configuration for the tools. Each tool's "model" field supports "provider:model" format. Defaults to predefined configurations.
-            tool_batch_size (int, optional): The batch size for tool processing. Defaults to 3.
-            tool_max_workers (int, optional): The maximum number of workers for tool processing. Defaults to 10.
         Returns:
             tuple: A tuple containing the final output, total tokens used, and a details dictionary.
                 - final_output: The final response from the chat model.
@@ -635,8 +615,6 @@ IMPORTANT TOOL USAGE GUIDELINES:
         reasoning_model = reasoning_model or config.DEFAULT_REASONING_MODEL
         tools = tools if tools is not None else config.DEFAULT_TOOLS
         tools_config = tools_config if tools_config is not None else config.TOOLS_CONFIG.copy()
-        tool_batch_size = tool_batch_size or config.DEFAULT_TOOL_BATCH_SIZE
-        tool_max_workers = tool_max_workers or config.DEFAULT_TOOL_MAX_WORKERS
         
         if self.verbose:
             self.log.debug("=" * 50)
@@ -660,13 +638,13 @@ IMPORTANT TOOL USAGE GUIDELINES:
             if reasoning_pipeline:
                 futures.append({
                     "type": "reasoning",
-                    "future": executor.submit(self.run_reasoning_pipeline, messages, model, temperature, reasoning_iterations, tools, tools_config, tool_batch_size, tool_max_workers, reasoning_model, max_tokens)
+                    "future": executor.submit(self.run_reasoning_pipeline, messages, model, temperature, reasoning_iterations, tools, tools_config, reasoning_model, max_tokens)
                 })
             
             if steps_pipeline:
                 futures.append({
                     "type": "steps",
-                    "future": executor.submit(self.run_steps_pipeline, messages, model, temperature, tools, tools_config, tool_batch_size, tool_max_workers, steps_model, max_tokens)
+                    "future": executor.submit(self.run_steps_pipeline, messages, model, temperature, tools, tools_config, steps_model, max_tokens)
                 })
 
             for future in futures:
@@ -685,7 +663,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
         if schema:
             final_output, tokens = self.chat_with_model_parse(messages, schema=schema, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers, max_tokens=max_tokens)
         else:
-            final_output, tokens = self.chat_with_ai_sync(messages, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers, max_tokens=max_tokens)
+            final_output, tokens = self.chat_with_ai_sync(messages, model=model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens)
 
         if steps:
             steps.append(conclusion)
@@ -715,296 +693,16 @@ IMPORTANT TOOL USAGE GUIDELINES:
         return final_output, total_tokens, details_dict
 
     #! Tools ----------------------------------------------------------------
-    def _load_internal_tools(self, tools: list) -> dict:
-        """Dynamically load internal tool configurations from tool directories"""
-        tools_base_path = os.path.join(os.path.dirname(__file__), 'tools')
-        loaded_tools = {}
-        
-        for tool_name in tools:
-            tool_name_normalized = tool_name.replace('-', '_')  # Convert web-search to web_search
-            tool_path = os.path.join(tools_base_path, tool_name_normalized)
-            
-            if not os.path.exists(tool_path):
-                self.log.warning(f"Tool directory not found: {tool_path}")
-                continue
-                
-            try:
-                # Load prompts module to get _info and _description
-                prompts_module = importlib.import_module(f'.tools.{tool_name_normalized}.prompts', package='ultragpt')
-                info = getattr(prompts_module, '_info', f"Tool: {tool_name}")
-                description = getattr(prompts_module, '_description', info)
-                
-                # Load schemas module to get schema classes
-                schemas_module = importlib.import_module(f'.tools.{tool_name_normalized}.schemas', package='ultragpt')
-                
-                # Find the main schema class (usually ends with 'Query')
-                schema_class = None
-                for name, obj in inspect.getmembers(schemas_module):
-                    if (inspect.isclass(obj) and 
-                        issubclass(obj, BaseModel) and 
-                        name.endswith('Query')):
-                        schema_class = obj
-                        break
-                
-                if not schema_class:
-                    self.log.warning(f"No Query schema found for tool: {tool_name}")
-                    continue
-                
-                # Convert schema to tool format for native calling
-                schema_dict = schema_class.model_json_schema()
-                
-                loaded_tools[tool_name_normalized] = {  # Use normalized name as key
-                    'name': tool_name_normalized,
-                    'display_name': tool_name,
-                    'description': description,
-                    'schema': schema_class,
-                    'native_schema': {
-                        'type': 'function',
-                        'function': {
-                            'name': tool_name_normalized,
-                            'description': description,
-                            'parameters': schema_dict
-                        }
-                    }
-                }
-                
-                self.log.debug(f"✓ Loaded tool: {tool_name} (as {tool_name_normalized})")
-                
-            except Exception as e:
-                self.log.warning(f"Failed to load tool {tool_name}: {str(e)}")
-                continue
-        
-        return loaded_tools
-
-    def _convert_internal_tools_to_native_format(self, loaded_tools: dict) -> list:
-        """Convert loaded internal tools to native AI provider tool format"""
-        native_tools = []
-        
-        for tool_name, tool_config in loaded_tools.items():
-            # Use the native_schema that was already created in _load_internal_tools
-            if 'native_schema' in tool_config:
-                native_tools.append(tool_config['native_schema'])
-            else:
-                # Fallback: create schema from tool config
-                native_tool = {
-                    "type": "function",
-                    "function": {
-                        "name": tool_config['name'],
-                        "description": tool_config['description'],
-                        "parameters": {}
-                    }
-                }
-                native_tools.append(native_tool)
-        
-        return native_tools
-        
-        return native_tools
 
     def execute_tools(
         self,
         message: str,
         history: list,
         tools: list,
-        tools_config: dict,
-        tool_batch_size: int,
-        tool_max_workers: int
-    ) -> str:
-        """Execute tools using native AI tool calling - completely refactored approach"""
-        if not tools:
-            return ""
-        
-        try:
-            self.log.info(f"Loading and executing {len(tools)} tools using native AI tool calling")
-            if self.verbose:
-                self.log.debug(f"➤ Loading {len(tools)} tools for native AI tool calling")
-                self.log.debug(f"Query: {message[:100] + '...' if len(message) > 100 else message}")
-                self.log.debug("-" * 40)
-            
-            # Load internal tools dynamically
-            loaded_tools = self._load_internal_tools(tools)
-            if not loaded_tools:
-                self.log.warning("No tools could be loaded")
-                return ""
-            
-            # Convert to native tool format
-            native_tools = self._convert_internal_tools_to_native_format(loaded_tools)
-            
-            # Create tool selection prompt
-            tool_descriptions = []
-            for tool_name, tool_config in loaded_tools.items():
-                tool_descriptions.append(f"- {tool_config['display_name']}: {tool_config['description']}")
-            
-            tool_selection_prompt = f"""
-Available internal tools:
-{chr(10).join(tool_descriptions)}
-
-Analyze the user's message and select the appropriate tools with their parameters. Each tool should be called with the specific parameters needed to help answer the user's question.
-
-User message: "{message}"
-
-IMPORTANT: 
-- Only call tools that are actually needed to help answer the user's question
-- Use the tool's schema to provide the correct parameters
-- If no tools are needed, don't call any tools
-- You can call multiple tools if needed
-"""
-            
-            # Prepare messages for tool calling
-            tool_messages = [
-                {"role": "system", "content": tool_selection_prompt},
-                {"role": "user", "content": message}
-            ]
-            
-            # Add conversation history context (limited)
-            if history:
-                context_messages = history[-config.MAX_CONTEXT_MESSAGES:]  # Last N messages for context
-                for msg in context_messages:
-                    if msg.get("content") and msg.get("role") in ["user", "assistant"]:
-                        tool_messages.insert(-1, {
-                            "role": msg["role"], 
-                            "content": msg["content"]
-                        })
-            
-            # Get model from tools_config or use default
-            model = config.DEFAULT_TOOLS_MODEL
-            for tool_config in tools_config.values():
-                if 'model' in tool_config:
-                    model = tool_config['model']
-                    break
-            
-            # Make native tool call
-            try:
-                response_message, tokens = self.provider_manager.chat_completion_with_tools(
-                    model=model,
-                    messages=tool_messages,
-                    tools=native_tools,
-                    temperature=config.TOOL_SELECTION_TEMPERATURE,  # Low temperature for tool selection
-                    max_tokens=self.max_tokens
-                )
-                
-                if self.verbose:
-                    self.log.debug(f"AI tool selection completed (tokens: {tokens})")
-                
-            except Exception as e:
-                # If native tool calling fails, fall back to no tools
-                self.log.warning(f"Native tool calling failed, proceeding without tools: {str(e)}")
-                return ""
-            
-            # Process tool calls if any were made
-            if not response_message.get('tool_calls'):
-                if self.verbose:
-                    self.log.debug("AI decided no tools are needed")
-                return ""
-            
-            # Execute the selected tools
-            tool_results = []
-            for tool_call in response_message.get('tool_calls', []):
-                function_name = tool_call.get('function', {}).get('name')
-                function_args = tool_call.get('function', {}).get('arguments', {})
-                
-                # Parse arguments if they're in string format
-                if isinstance(function_args, str):
-                    try:
-                        import json
-                        function_args = json.loads(function_args)
-                    except json.JSONDecodeError:
-                        self.log.error(f"Failed to parse tool arguments: {function_args}")
-                        continue
-                
-                if function_name in loaded_tools:
-                    tool_config = loaded_tools[function_name]
-                    
-                    try:
-                        if self.verbose:
-                            self.log.debug(f"Executing tool: {function_name}")
-                            self.log.debug(f"Parameters: {function_args}")
-                        
-                        # Execute the tool with the AI-selected parameters
-                        tool_result = self._execute_internal_tool_with_params(
-                            tool_config, function_args, message, history, tools_config
-                        )
-                        
-                        tool_results.append({
-                            "tool": tool_config['display_name'],
-                            "response": tool_result
-                        })
-                        
-                        if self.verbose:
-                            self.log.debug(f"✓ {function_name} completed")
-                            self.log.debug("-" * 40)
-                            self.log.debug(tool_result if tool_result else "(empty result)")
-                            self.log.debug("-" * 40)
-                            
-                    except Exception as e:
-                        self.log.error(f"Tool {function_name} execution failed: {str(e)}")
-                        tool_results.append({
-                            "tool": tool_config['display_name'],
-                            "response": f"Tool execution failed: {str(e)}"
-                        })
-                else:
-                    self.log.warning(f"Unknown tool called: {function_name}")
-            
-            # Format results
-            if not tool_results:
-                return ""
-                
-            formatted_responses = []
-            for result in tool_results:
-                tool_name = result['tool'].upper()
-                response = result['response'].strip() if result['response'] else ""
-                if response:
-                    formatted = f"[{tool_name}]\n{response}"
-                    formatted_responses.append(formatted)
-            
-            success_count = len([r for r in tool_results if r['response'] and not r['response'].startswith('Tool execution failed')])
-            self.log.info(f"Tools execution completed ({success_count}/{len(tool_results)} successful)")
-            
-            if self.verbose:
-                self.log.debug(f"✓ Tools execution completed ({success_count}/{len(tool_results)} successful)")
-                
-            return "\n\n".join(formatted_responses)
-                
-        except Exception as e:
-            self.log.error(f"Tool execution failed: {str(e)}")
-            if self.verbose:
-                self.log.debug(f"✗ Tool execution failed: {str(e)}")
-            return ""
-
-    def _execute_internal_tool_with_params(
-        self, 
-        tool_config: dict, 
-        parameters: dict, 
-        message: str, 
-        history: list, 
         tools_config: dict
     ) -> str:
-        """Execute an internal tool directly with AI-provided parameters"""
-        try:
-            # Get tool-specific config
-            tool_name_normalized = tool_config['name']  # Use normalized name
-            config = tools_config.get(tool_name_normalized, {})
-            
-            # Import and execute the tool's execute_tool function
-            try:
-                core_module = importlib.import_module(f'.tools.{tool_name_normalized}.core', package='ultragpt')
-                execute_function = getattr(core_module, 'execute_tool', None)
-                
-                if execute_function:
-                    # Pass additional config for web search if needed
-                    if tool_name_normalized == "web_search":
-                        parameters['google_api_key'] = self.google_api_key
-                        parameters['search_engine_id'] = self.search_engine_id
-                    
-                    result = execute_function(parameters)
-                    return result if result else ""
-                else:
-                    return f"No execute_tool function found for {tool_name_normalized}"
-                    
-            except Exception as e:
-                return f"Error executing tool {tool_name_normalized}: {str(e)}"
-                
-        except Exception as e:
-            return f"Tool execution error: {str(e)}"
+        """Execute tools using native AI tool calling - delegates to ToolManager"""
+        return self.tool_manager.execute_tools(message, history, tools, tools_config)
 
     #! Tool Call Functionality --------------------------------------------
     def tool_call(
@@ -1021,8 +719,6 @@ IMPORTANT:
         reasoning_model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)
         tools: list = None,
         tools_config: dict = None,
-        tool_batch_size: int = None,
-        tool_max_workers: int = None,
         max_tokens: Optional[int] = None
     ):
         """
@@ -1042,8 +738,6 @@ IMPORTANT:
             reasoning_model (str, optional): Specific model for reasoning pipeline. Format: "provider:model" or just "model". Uses main model if None.
             tools (list, optional): The list of internal tools to enable. Defaults to ["web-search", "calculator", "math-operations"].
             tools_config (dict, optional): The configuration for internal tools.
-            tool_batch_size (int, optional): The batch size for tool processing. Defaults to 3.
-            tool_max_workers (int, optional): The maximum number of workers for tool processing. Defaults to 10.
             max_tokens (Optional[int], optional): Maximum number of tokens to generate. If None, uses instance default or provider default. Defaults to None.
         
         Returns:
@@ -1077,8 +771,6 @@ IMPORTANT:
         temperature = temperature if temperature is not None else config.DEFAULT_TEMPERATURE
         reasoning_iterations = reasoning_iterations if reasoning_iterations is not None else config.DEFAULT_REASONING_ITERATIONS
         tools = tools or config.DEFAULT_TOOLS
-        tool_batch_size = tool_batch_size if tool_batch_size is not None else config.DEFAULT_TOOL_BATCH_SIZE
-        tool_max_workers = tool_max_workers if tool_max_workers is not None else config.DEFAULT_TOOL_MAX_WORKERS
         
         # Validate user tools
         validated_tools = self._validate_user_tools(user_tools)
@@ -1105,7 +797,7 @@ IMPORTANT:
                 future = executor.submit(
                     self.run_reasoning_pipeline,
                     tool_call_messages, model, temperature, reasoning_iterations,
-                    tools, tools_config, tool_batch_size, tool_max_workers, reasoning_model, max_tokens
+                    tools, tools_config, reasoning_model, max_tokens
                 )
                 futures.append(("reasoning", future))
             
@@ -1113,7 +805,7 @@ IMPORTANT:
                 future = executor.submit(
                     self.run_steps_pipeline,
                     tool_call_messages, model, temperature,
-                    tools, tools_config, tool_batch_size, tool_max_workers, steps_model, max_tokens
+                    tools, tools_config, steps_model, max_tokens
                 )
                 futures.append(("steps", future))
             
@@ -1151,8 +843,6 @@ IMPORTANT:
             temperature=temperature,
             tools=tools,
             tools_config=tools_config,
-            tool_batch_size=tool_batch_size,
-            tool_max_workers=tool_max_workers,
             max_tokens=max_tokens,
             parallel_tool_calls=parallel_calls
         )
