@@ -1,18 +1,18 @@
 
-def make_query(message: str) -> str:
-    """Format prompt for tool analysis"""
-    example = """Your output should look like this (example):
-{
-    "query": ["search query1", "search query2"]
-}"""
-    return f"""This is a user message. come up with a search query based on the message. so that the search query can be used to search the web.
+#* Web Search Prompts ---------------------------------------------------------------
+_info = "This allows you to search the web and scrape content from specific URLs"
 
-Message: "{message}"
+_description = """This is a web search tool that allows you to:
+1. Search the web using Google Custom Search API
+2. Scrape and extract content from specific URLs
+3. Get search results and website content for research purposes
 
-{example}
+Parameters:
+- query: The search query string (required for web search)
+- url: The URL to scrape content from (required for URL scraping)
+- num_results: Number of search results to return (optional, default: 5)
 
-Rules:
-- It is not mandetory to use all the search queries. If nothing is needed, return empty array.
-- Only include the search query under "query" that is needed to respond to the message.
-- The search query should be relevant to the message. And help to find the information that the user is looking for.
-"""
+Examples:
+- "Search for Python tutorials" → query="Python tutorials"
+- "Get content from https://example.com" → url="https://example.com"
+- "Search for AI news with 10 results" → query="AI news", num_results=10"""
