@@ -54,18 +54,28 @@ class BaseProvider:
 class OpenAIProvider(BaseProvider):
     """OpenAI provider implementation"""
     
+    # Model name prefixes that don't support temperature parameter
+    NO_TEMPERATURE_MODELS = ["o1", "o2", "o3", "o4", "gpt-5"]
+    
     def __init__(self, api_key: str, **kwargs):
         super().__init__(api_key, **kwargs)
         self.client = OpenAI(api_key=api_key)
+        
+    def _should_include_temperature(self, model: str) -> bool:
+        """Check if model supports temperature parameter"""
+        return not any(prefix in model for prefix in self.NO_TEMPERATURE_MODELS)
         
     def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096) -> tuple:
         """Standard OpenAI chat completion"""
         kwargs = {
             "model": model,
             "messages": messages,
-            "stream": False,
-            "temperature": temperature
+            "stream": False
         }
+        
+        # Only add temperature if model supports it
+        if self._should_include_temperature(model):
+            kwargs["temperature"] = temperature
         
         # Only add max_tokens if it's not None
         if max_tokens is not None:
@@ -81,9 +91,12 @@ class OpenAIProvider(BaseProvider):
         kwargs = {
             "model": model,
             "messages": messages,
-            "response_format": schema,
-            "temperature": temperature
+            "response_format": schema
         }
+        
+        # Only add temperature if model supports it
+        if self._should_include_temperature(model):
+            kwargs["temperature"] = temperature
         
         # Only add max_tokens if it's not None
         if max_tokens is not None:
@@ -102,9 +115,12 @@ class OpenAIProvider(BaseProvider):
             "model": model,
             "messages": messages,
             "tools": tools,
-            "temperature": temperature,
             "tool_choice": "required"  # Always require the AI to choose at least one tool
         }
+        
+        # Only add temperature if model supports it
+        if self._should_include_temperature(model):
+            kwargs["temperature"] = temperature
         
         # Only add max_tokens if it's not None
         if max_tokens is not None:
