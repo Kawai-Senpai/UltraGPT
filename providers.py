@@ -17,21 +17,25 @@ class BaseProvider:
     def __init__(self, api_key: str, **kwargs):
         self.api_key = api_key
         
-    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096) -> tuple:
+    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
         """
         Standard chat completion
         Returns: (content: str, tokens: int)
+        Args:
+            deepthink: Enable deep thinking mode for supported models (future functionality)
         """
         raise NotImplementedError
         
-    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = 4096) -> tuple:
+    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
         """
         Chat completion with structured output
         Returns: (parsed_content: dict, tokens: int)
+        Args:
+            deepthink: Enable deep thinking mode for supported models (future functionality)
         """
         raise NotImplementedError
         
-    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None) -> tuple:
+    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
         """
         Chat completion with native tool calling
         Returns: (response_message: dict, tokens: int)
@@ -39,6 +43,7 @@ class BaseProvider:
         Args:
             parallel_tool_calls: For OpenAI - whether to allow parallel tool calls (None = default behavior)
                                     For Claude - converted to disable_parallel_tool_use internally
+            deepthink: Enable deep thinking mode for supported models (future functionality)
         Note: AI will always be required to choose at least one tool from the provided tools
         """
         raise NotImplementedError
@@ -70,7 +75,7 @@ class OpenAIProvider(BaseProvider):
         """Check if model supports max_tokens parameter"""
         return not any(prefix in model for prefix in self.NO_MAX_TOKENS_MODELS)
         
-    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096) -> tuple:
+    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
         """Standard OpenAI chat completion"""
         kwargs = {
             "model": model,
@@ -91,7 +96,7 @@ class OpenAIProvider(BaseProvider):
         tokens = response.usage.total_tokens
         return content, tokens
         
-    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = 4096) -> tuple:
+    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
         """OpenAI structured output with schema"""
         kwargs = {
             "model": model,
@@ -114,7 +119,7 @@ class OpenAIProvider(BaseProvider):
         tokens = response.usage.total_tokens
         return content, tokens
         
-    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None) -> tuple:
+    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
         """OpenAI native tool calling - always requires at least one tool to be called"""
         kwargs = {
             "model": model,
@@ -238,7 +243,7 @@ class ClaudeProvider(BaseProvider):
         system_prompt = "\n\n".join(system_parts) if system_parts else None
         return converted_messages, system_prompt
         
-    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096) -> tuple:
+    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
         """Claude chat completion"""
         converted_messages, system_prompt = self.convert_messages(messages)
         
@@ -260,7 +265,7 @@ class ClaudeProvider(BaseProvider):
         tokens = response.usage.input_tokens + response.usage.output_tokens
         return content, tokens
         
-    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = 4096) -> tuple:
+    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
         """
         Claude structured output with schema using tool-based approach
         
@@ -328,7 +333,7 @@ class ClaudeProvider(BaseProvider):
         tokens = response.usage.input_tokens + response.usage.output_tokens
         return content, tokens
         
-    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None) -> tuple:
+    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
         """Claude native tool calling - always requires at least one tool to be called"""
         converted_messages, system_prompt = self.convert_messages(messages)
         
@@ -434,20 +439,20 @@ class ProviderManager:
             # Default to openai if no provider specified
             return "openai", model
             
-    def chat_completion(self, model: str, messages: List[Dict], temperature: float = 0.7, max_tokens: Optional[int] = 4096) -> tuple:
+    def chat_completion(self, model: str, messages: List[Dict], temperature: float = 0.7, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
         """Route chat completion to appropriate provider"""
         provider_name, model_name = self.parse_model_string(model)
         provider = self.get_provider(provider_name)
-        return provider.chat_completion(messages, model_name, temperature, max_tokens)
+        return provider.chat_completion(messages, model_name, temperature, max_tokens, deepthink)
         
-    def chat_completion_with_schema(self, model: str, messages: List[Dict], schema: BaseModel, temperature: float = 0.7, max_tokens: Optional[int] = 4096) -> tuple:
+    def chat_completion_with_schema(self, model: str, messages: List[Dict], schema: BaseModel, temperature: float = 0.7, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
         """Route structured chat completion to appropriate provider"""
         provider_name, model_name = self.parse_model_string(model)
         provider = self.get_provider(provider_name)
-        return provider.chat_completion_with_schema(messages, schema, model_name, temperature, max_tokens)
+        return provider.chat_completion_with_schema(messages, schema, model_name, temperature, max_tokens, deepthink)
         
-    def chat_completion_with_tools(self, model: str, messages: List[Dict], tools: List[Dict], temperature: float = 0.7, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None) -> tuple:
+    def chat_completion_with_tools(self, model: str, messages: List[Dict], tools: List[Dict], temperature: float = 0.7, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
         """Route tool calling to appropriate provider - always requires at least one tool to be called"""
         provider_name, model_name = self.parse_model_string(model)
         provider = self.get_provider(provider_name)
-        return provider.chat_completion_with_tools(messages, tools, model_name, temperature, max_tokens, parallel_tool_calls)
+        return provider.chat_completion_with_tools(messages, tools, model_name, temperature, max_tokens, parallel_tool_calls, deepthink)

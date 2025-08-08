@@ -58,21 +58,49 @@ def scrape_url(url, timeout=15, pause=1, max_length=5000):
 
 def google_search(query, api_key, search_engine_id, num_results=10):
     """Perform Google Custom Search API search with comprehensive error handling"""
+    debug_info = []
     try:
         if not api_key or not search_engine_id:
-            return []
-            
+            debug_info.append("ERROR: Missing API credentials")
+            return [], debug_info
+        
+        # Debug credential format (without exposing actual keys)
+        api_key_debug = f"API key: {api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "API key: [short key]"
+        engine_id_debug = f"Engine ID: {search_engine_id[:8]}...{search_engine_id[-4:]}" if len(search_engine_id) > 12 else f"Engine ID: {search_engine_id}"
+        debug_info.append(f"Using credentials - {api_key_debug}, {engine_id_debug}")
+        
+        debug_info.append(f"Building Google Custom Search service...")
         service = build("customsearch", "v1", developerKey=api_key)
+        debug_info.append(f"Service built successfully")
+        
+        debug_info.append(f"Executing search for query: '{query}' with {num_results} results")
         response = (
             service.cse()
             .list(q=query, cx=search_engine_id, num=min(num_results, 10))  # Google API max is 10
             .execute()
         )
-        return response.get("items", [])
+        debug_info.append(f"API call completed successfully")
+        
+        items = response.get("items", [])
+        total_results = response.get("searchInformation", {}).get("totalResults", "0")
+        debug_info.append(f"Google API returned {len(items)} items out of {total_results} total results")
+        
+        # Debug the full response structure (first time only)
+        if items:
+            debug_info.append(f"Sample result keys: {list(items[0].keys())}")
+        else:
+            debug_info.append(f"Full response keys: {list(response.keys())}")
+            if 'searchInformation' in response:
+                search_info = response['searchInformation']
+                debug_info.append(f"Search info: {search_info}")
+        
+        return items, debug_info
         
     except Exception as e:
-        # Silently fail and return empty results - errors will be logged by caller
-        return []
+        debug_info.append(f"ERROR in Google API call: {type(e).__name__}: {str(e)}")
+        import traceback
+        debug_info.append(f"Full traceback: {traceback.format_exc()}")
+        return [], debug_info
 
 #* Web search ---------------------------------------------------------------
 def execute_tool(parameters):
@@ -81,6 +109,10 @@ def execute_tool(parameters):
         query = parameters.get("query")
         url = parameters.get("url")
         num_results = parameters.get("num_results", 5)
+        
+        # Handle query parameter - it might come as a list or string
+        if isinstance(query, list):
+            query = query[0] if query else None
         
         if url:
             # URL scraping mode
@@ -93,18 +125,33 @@ def execute_tool(parameters):
             except Exception as e:
                 return f"Error scraping URL {url}: {str(e)}"
         elif query:
-            # Web search mode - use direct Google search
-            from ..config import config
-            api_key = config.get("google_api_key")
-            search_engine_id = config.get("search_engine_id")
+            # Web search mode - get credentials from thread-local context
+            try:
+                from .context import get_credentials
+                api_key, search_engine_id = get_credentials()
+                if not api_key or not search_engine_id:
+                    # Fallback to environment variables
+                    api_key = os.getenv('GOOGLE_API_KEY')
+                    search_engine_id = os.getenv('GOOGLE_SEARCH_ENGINE_ID')
+            except ImportError:
+                # Fallback to environment variables
+                api_key = os.getenv('GOOGLE_API_KEY')
+                search_engine_id = os.getenv('GOOGLE_SEARCH_ENGINE_ID')
+            
+            # Debug credential status
+            credential_status = f"API key: {'✓' if api_key else '✗'}, Search Engine ID: {'✓' if search_engine_id else '✗'}"
             
             if not api_key or not search_engine_id:
-                return "Google API credentials not configured. Please set google_api_key and search_engine_id in config."
+                return f"Google API credentials not configured. {credential_status}. Please provide google_api_key and search_engine_id to UltraGPT constructor or set environment variables GOOGLE_API_KEY and GOOGLE_SEARCH_ENGINE_ID."
             
             try:
-                search_results = google_search(query, api_key, search_engine_id, num_results)
+                search_results, debug_info = google_search(query, api_key, search_engine_id, num_results)
+                
+                # Include debug info in response for troubleshooting
+                debug_section = "\n".join(debug_info)
+                
                 if not search_results:
-                    return f"No search results found for: {query}"
+                    return f"No search results found for query: '{query}'. {credential_status}.\n\nDEBUG INFO:\n{debug_section}\n\nThis may be due to: 1) Invalid API credentials, 2) Quota exceeded, 3) No matching results for this query, 4) API configuration issues."
                 
                 formatted_results = []
                 for result in search_results:
@@ -113,9 +160,9 @@ def execute_tool(parameters):
                     snippet = result.get("snippet", "")
                     formatted_results.append(f"Title: {title}\nURL: {url}\nSnippet: {snippet}")
                 
-                return f"Search results for '{query}':\n\n" + "\n---\n".join(formatted_results)
+                return f"Search results for '{query}':\n\n" + "\n---\n".join(formatted_results) + f"\n\nDEBUG INFO:\n{debug_section}"
             except Exception as e:
-                return f"Error searching for '{query}': {str(e)}"
+                return f"Error searching for '{query}': {str(e)}. {credential_status}. Check your Google API credentials and quota."
         else:
             return "Please provide either a 'query' for web search or a 'url' for scraping."
     except Exception as e:

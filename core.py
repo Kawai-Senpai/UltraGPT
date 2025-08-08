@@ -113,7 +113,8 @@ class UltraGPT:
         temperature: float,
         tools: list,
         tools_config: dict,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        deepthink: Optional[bool] = None
     ):
         """
         Sends a synchronous chat request to the specified AI provider and processes the response.
@@ -123,8 +124,9 @@ class UltraGPT:
             temperature (float): The temperature for the model's output.
             tools (list): The list of tools to enable.
             tools_config (dict): The configuration for the tools.
+            deepthink (Optional[bool]): Enable deep thinking mode for supported models.
         Returns:
-            tuple: A tuple containing the response content (str) and the total number of tokens used (int).
+            tuple: A tuple containing the response content, total tokens, and details dict.
         Raises:
             Exception: If the request to the AI provider fails.
         Logs:
@@ -138,7 +140,7 @@ class UltraGPT:
                 self.log.debug(f"AI Request → Provider: {provider_name}, Model: {model_name}, Messages: " + str(len(messages)))
                 self.log.debug("Checking for tool needs...")
             
-            tool_response = self.execute_tools(message=messages[-1]["content"], history=messages, tools=tools, tools_config=tools_config)
+            tool_response, tool_usage_details = self.execute_tools(history=messages, tools=tools, tools_config=tools_config)
             if tool_response:
                 if self.verbose:
                     self.log.debug("Appending tool responses to message")
@@ -151,13 +153,18 @@ class UltraGPT:
                 model=model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens if max_tokens is not None else self.max_tokens
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+                deepthink=deepthink
             )
+            
+            details_dict = {
+                "tools_used": tool_usage_details
+            }
             
             self.log.debug("Response received (tokens: " + str(tokens) + ")")
             if self.verbose:
                 self.log.debug("✓ Response received (" + str(tokens) + " tokens)")
-            return content, tokens
+            return content, tokens, details_dict
         except Exception as e:
             self.log.error("AI sync request failed: " + str(e))
             if self.verbose:
@@ -172,7 +179,8 @@ class UltraGPT:
         temperature: float = None,
         tools: list = [],
         tools_config: dict = {},
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        deepthink: Optional[bool] = None
     ):
         """
         Sends a chat message to the model for parsing and returns the parsed response.
@@ -184,7 +192,7 @@ class UltraGPT:
             tools (list): The list of tools to enable.
             tools_config (dict): The configuration for the tools.
         Returns:
-            tuple: A tuple containing the parsed content and the total number of tokens used.
+            tuple: A tuple containing the parsed content, total tokens, and details dict.
         Raises:
             Exception: If the parse request fails.
         """
@@ -194,7 +202,7 @@ class UltraGPT:
         try:
             self.log.debug("Sending parse request with schema: %s", schema)
             
-            tool_response = self.execute_tools(message=messages[-1]["content"], history=messages, tools=tools, tools_config=tools_config)
+            tool_response, tool_usage_details = self.execute_tools(history=messages, tools=tools, tools_config=tools_config)
             if tool_response:
                 tool_response = "Tool Responses:\n" + tool_response
             messages = self.append_message_to_system(messages, tool_response)
@@ -204,11 +212,16 @@ class UltraGPT:
                 messages=messages,
                 schema=schema,
                 temperature=temperature,
-                max_tokens=max_tokens if max_tokens is not None else self.max_tokens
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+                deepthink=deepthink
             )
             
+            details_dict = {
+                "tools_used": tool_usage_details
+            }
+            
             self.log.debug("Parse response received (tokens: " + str(tokens) + ")")
-            return content, tokens
+            return content, tokens, details_dict
         except Exception as e:
             self.log.error("Parse request failed: " + str(e))
             raise e
@@ -222,7 +235,8 @@ class UltraGPT:
         tools: list = [],
         tools_config: dict = {},
         max_tokens: Optional[int] = None,
-        parallel_tool_calls: Optional[bool] = None
+        parallel_tool_calls: Optional[bool] = None,
+        deepthink: Optional[bool] = None
     ):
         """
         Sends a chat message to the model with native tool calling support.
@@ -232,8 +246,7 @@ class UltraGPT:
             self.log.debug("Sending native tool calling request")
             
             # Execute UltraGPT tools if any
-            tool_response = self.execute_tools(
-                message=messages[-1]["content"], 
+            tool_response, tool_usage_details = self.execute_tools(
                 history=messages, 
                 tools=tools, 
                 tools_config=tools_config
@@ -293,11 +306,16 @@ IMPORTANT TOOL USAGE GUIDELINES:
                 tools=native_tools,
                 temperature=temperature,
                 max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
-                parallel_tool_calls=parallel_tool_calls
+                parallel_tool_calls=parallel_tool_calls,
+                deepthink=deepthink
             )
             
+            details_dict = {
+                "tools_used": tool_usage_details
+            }
+            
             self.log.debug("Native tool calling response received (tokens: " + str(tokens) + ")")
-            return response_message, tokens
+            return response_message, tokens, details_dict
         except Exception as e:
             self.log.error("Native tool calling request failed: " + str(e))
             raise e
@@ -451,7 +469,8 @@ IMPORTANT TOOL USAGE GUIDELINES:
         tools: list,
         tools_config: dict,
         steps_model: str = None,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        deepthink: Optional[bool] = None
     ):
         # Use steps_model if provided, otherwise use main model
         active_model = steps_model if steps_model else model
@@ -463,12 +482,15 @@ IMPORTANT TOOL USAGE GUIDELINES:
         else:
             self.log.info("Starting steps pipeline")
         total_tokens = 0
+        all_tools_used = []
 
         messages = self.turnoff_system_message(messages)
         steps_generator_message = messages + [{"role": "system", "content": generate_steps_prompt()}]
 
-        steps_json, tokens = self.chat_with_model_parse(steps_generator_message, schema=Steps, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens)
+        steps_json, tokens, steps_details = self.chat_with_model_parse(steps_generator_message, schema=Steps, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens, deepthink=deepthink)
         total_tokens += tokens
+        all_tools_used.extend(steps_details.get("tools_used", []))
+        
         steps = steps_json.get("steps", [])
         if self.verbose:
             self.log.debug("Generated " + str(len(steps)) + " steps:")
@@ -485,9 +507,10 @@ IMPORTANT TOOL USAGE GUIDELINES:
             self.log.debug("Processing step " + str(idx) + "/" + str(len(steps)))
             step_prompt = each_step_prompt(memory, step)
             step_message = messages + [{"role": "system", "content": step_prompt}]
-            step_response, tokens = self.chat_with_ai_sync(step_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens)
+            step_response, tokens, step_details = self.chat_with_ai_sync(step_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens, deepthink=deepthink)
             self.log.debug("Step " + str(idx) + " response: " + step_response[:100] + "...")
             total_tokens += tokens
+            all_tools_used.extend(step_details.get("tools_used", []))
             memory.append(
                 {
                     "step": step,
@@ -498,8 +521,9 @@ IMPORTANT TOOL USAGE GUIDELINES:
         # Generate final conclusion
         conclusion_prompt = generate_conclusion_prompt(memory)
         conclusion_message = messages + [{"role": "system", "content": conclusion_prompt}]
-        conclusion, tokens = self.chat_with_ai_sync(conclusion_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens)
+        conclusion, tokens, conclusion_details = self.chat_with_ai_sync(conclusion_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens, deepthink=deepthink)
         total_tokens += tokens
+        all_tools_used.extend(conclusion_details.get("tools_used", []))
 
         if self.verbose:
             self.log.debug("✓ Steps pipeline completed")
@@ -507,7 +531,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
         return {
             "steps": memory,
             "conclusion": conclusion
-        }, total_tokens
+        }, total_tokens, {"tools_used": all_tools_used}
 
     def run_reasoning_pipeline(
         self,
@@ -518,7 +542,8 @@ IMPORTANT TOOL USAGE GUIDELINES:
         tools: list,
         tools_config: dict,
         reasoning_model: str = None,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        deepthink: Optional[bool] = None
     ):
         # Use reasoning_model if provided, otherwise use main model
         active_model = reasoning_model if reasoning_model else model
@@ -531,6 +556,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
             self.log.info("Starting reasoning pipeline (" + str(reasoning_iterations) + " iterations)")
         total_tokens = 0
         all_thoughts = []
+        all_tools_used = []
         messages = self.turnoff_system_message(messages)
 
         for iteration in range(reasoning_iterations):
@@ -542,16 +568,18 @@ IMPORTANT TOOL USAGE GUIDELINES:
                 {"role": "system", "content": generate_reasoning_prompt(all_thoughts)}
             ]
             
-            reasoning_json, tokens = self.chat_with_model_parse(
+            reasoning_json, tokens, iteration_details = self.chat_with_model_parse(
                 reasoning_message, 
                 schema=Reasoning,
                 model=active_model,
                 temperature=temperature,
                 tools=tools,
                 tools_config=tools_config,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                deepthink=deepthink
             )
             total_tokens += tokens
+            all_tools_used.extend(iteration_details.get("tools_used", []))
             
             new_thoughts = reasoning_json.get("thoughts", [])
             all_thoughts.extend(new_thoughts)
@@ -563,7 +591,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
             else:
                 self.log.debug("Generated " + str(len(new_thoughts)) + " new thoughts")
 
-        return all_thoughts, total_tokens
+        return all_thoughts, total_tokens, {"tools_used": all_tools_used}
     
     #! Main Chat Function ---------------------------------------------------
     def chat(
@@ -580,6 +608,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
         reasoning_model: str = None,
         tools: list = None,
         tools_config: dict = None,
+        deepthink: Optional[bool] = None
     ):
         """
         Initiates a chat session with the given messages and optional schema.
@@ -629,8 +658,10 @@ IMPORTANT TOOL USAGE GUIDELINES:
 
         reasoning_output = []
         reasoning_tokens = 0
+        reasoning_tools_used = []
         steps_output = {"steps": [], "conclusion": ""}
         steps_tokens = 0
+        steps_tools_used = []
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = []
@@ -638,20 +669,22 @@ IMPORTANT TOOL USAGE GUIDELINES:
             if reasoning_pipeline:
                 futures.append({
                     "type": "reasoning",
-                    "future": executor.submit(self.run_reasoning_pipeline, messages, model, temperature, reasoning_iterations, tools, tools_config, reasoning_model, max_tokens)
+                    "future": executor.submit(self.run_reasoning_pipeline, messages, model, temperature, reasoning_iterations, tools, tools_config, reasoning_model, max_tokens, deepthink)
                 })
             
             if steps_pipeline:
                 futures.append({
                     "type": "steps",
-                    "future": executor.submit(self.run_steps_pipeline, messages, model, temperature, tools, tools_config, steps_model, max_tokens)
+                    "future": executor.submit(self.run_steps_pipeline, messages, model, temperature, tools, tools_config, steps_model, max_tokens, deepthink)
                 })
 
             for future in futures:
                 if future["type"] == "reasoning":
-                    reasoning_output, reasoning_tokens = future["future"].result()
+                    reasoning_output, reasoning_tokens, reasoning_details = future["future"].result()
+                    reasoning_tools_used = reasoning_details.get("tools_used", [])
                 elif future["type"] == "steps":
-                    steps_output, steps_tokens = future["future"].result()
+                    steps_output, steps_tokens, steps_details = future["future"].result()
+                    steps_tools_used = steps_details.get("tools_used", [])
 
         conclusion = steps_output.get("conclusion", "")
         steps = steps_output.get("steps", [])
@@ -661,19 +694,23 @@ IMPORTANT TOOL USAGE GUIDELINES:
             messages = self.add_message_before_system(messages, {"role": "user", "content": prompt})
 
         if schema:
-            final_output, tokens = self.chat_with_model_parse(messages, schema=schema, model=model, temperature=temperature, tools=tools, tools_config=tools_config, tool_batch_size=tool_batch_size, tool_max_workers=tool_max_workers, max_tokens=max_tokens)
+            final_output, tokens, final_details = self.chat_with_model_parse(messages, schema=schema, model=model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens, deepthink=deepthink)
         else:
-            final_output, tokens = self.chat_with_ai_sync(messages, model=model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens)
+            final_output, tokens, final_details = self.chat_with_ai_sync(messages, model=model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens, deepthink=deepthink)
 
         if steps:
             steps.append(conclusion)
+        
+        # Combine all tools used from all stages
+        all_tools_used = reasoning_tools_used + steps_tools_used + final_details.get("tools_used", [])
             
         details_dict = {
             "reasoning": reasoning_output,
             "steps": steps,
             "reasoning_tokens": reasoning_tokens,
             "steps_tokens": steps_tokens,
-            "final_tokens": tokens
+            "final_tokens": tokens,
+            "tools_used": all_tools_used
         }
         total_tokens = reasoning_tokens + steps_tokens + tokens
         if self.verbose:
@@ -696,13 +733,12 @@ IMPORTANT TOOL USAGE GUIDELINES:
 
     def execute_tools(
         self,
-        message: str,
         history: list,
         tools: list,
         tools_config: dict
-    ) -> str:
-        """Execute tools using native AI tool calling - delegates to ToolManager"""
-        return self.tool_manager.execute_tools(message, history, tools, tools_config)
+    ) -> tuple:
+        """Execute tools using native AI tool calling - delegates to ToolManager, returns (result, tool_usage_details)"""
+        return self.tool_manager.execute_tools(history, tools, tools_config)
 
     #! Tool Call Functionality --------------------------------------------
     def tool_call(
@@ -719,7 +755,8 @@ IMPORTANT TOOL USAGE GUIDELINES:
         reasoning_model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)
         tools: list = None,
         tools_config: dict = None,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        deepthink: Optional[bool] = None
     ):
         """
         Tool call functionality that uses UltraGPT's execution layer to determine 
@@ -787,8 +824,10 @@ IMPORTANT TOOL USAGE GUIDELINES:
         # Use UltraGPT's execution layer to analyze and determine tool calls
         reasoning_output = []
         reasoning_tokens = 0
+        reasoning_tools_used = []
         steps_output = {"steps": [], "conclusion": ""}
         steps_tokens = 0
+        steps_tools_used = []
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = []
@@ -797,7 +836,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
                 future = executor.submit(
                     self.run_reasoning_pipeline,
                     tool_call_messages, model, temperature, reasoning_iterations,
-                    tools, tools_config, reasoning_model, max_tokens
+                    tools, tools_config, reasoning_model, max_tokens, deepthink
                 )
                 futures.append(("reasoning", future))
             
@@ -805,19 +844,21 @@ IMPORTANT TOOL USAGE GUIDELINES:
                 future = executor.submit(
                     self.run_steps_pipeline,
                     tool_call_messages, model, temperature,
-                    tools, tools_config, steps_model, max_tokens
+                    tools, tools_config, steps_model, max_tokens, deepthink
                 )
                 futures.append(("steps", future))
             
             for name, future in futures:
                 try:
-                    result, tokens = future.result()
+                    result, tokens, details = future.result()
                     if name == "reasoning":
                         reasoning_output = result
                         reasoning_tokens = tokens
+                        reasoning_tools_used = details.get("tools_used", [])
                     elif name == "steps":
                         steps_output = result
                         steps_tokens = tokens
+                        steps_tools_used = details.get("tools_used", [])
                 except Exception as e:
                     self.log.error("Pipeline " + name + " failed: " + str(e))
                     if self.verbose:
@@ -836,7 +877,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
         # AI will always choose at least one tool - parallel_tool_calls controls how many
         parallel_calls = allow_multiple  # Simple: allow_multiple directly controls parallel calls
         
-        tool_call_response, tokens = self.chat_with_model_tools(
+        tool_call_response, tokens, final_details = self.chat_with_model_tools(
             enhanced_messages, 
             user_tools=validated_tools,
             model=model, 
@@ -844,10 +885,14 @@ IMPORTANT TOOL USAGE GUIDELINES:
             tools=tools,
             tools_config=tools_config,
             max_tokens=max_tokens,
-            parallel_tool_calls=parallel_calls
+            parallel_tool_calls=parallel_calls,
+            deepthink=deepthink
         )
 
         total_tokens = reasoning_tokens + steps_tokens + tokens
+        
+        # Combine all tools used from all stages
+        all_tools_used = reasoning_tools_used + steps_tools_used + final_details.get("tools_used", [])
         
         # Create details_dict similar to chat method for consistency
         details_dict = {
@@ -856,7 +901,8 @@ IMPORTANT TOOL USAGE GUIDELINES:
             "conclusion": steps_output.get("conclusion", ""),
             "reasoning_tokens": reasoning_tokens,
             "steps_tokens": steps_tokens,
-            "final_tokens": tokens
+            "final_tokens": tokens,
+            "tools_used": all_tools_used
         }
         
         if self.verbose:

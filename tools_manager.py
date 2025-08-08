@@ -19,7 +19,6 @@ from pydantic import BaseModel
 
 from . import config
 
-
 class ToolManager:
     """
     Manages all tool-related operations for UltraGPT.
@@ -128,12 +127,9 @@ class ToolManager:
         self, 
         tool_config: dict, 
         parameters: dict, 
-        message: str, 
-        history: list, 
         tools_config: dict
     ) -> str:
         """Execute an internal tool directly with AI-provided parameters"""
-        # NOTE: 'message' and 'history' parameters are not used in current implementation
         # but kept for future extensibility
         try:
             # Get tool-specific config
@@ -146,12 +142,23 @@ class ToolManager:
                 execute_function = getattr(core_module, 'execute_tool', None)
                 
                 if execute_function:
-                    # Pass additional config for web search if needed
+                    # Set credentials for web search tool in thread-local context
                     if tool_name_normalized == "web_search":
-                        parameters['google_api_key'] = self.google_api_key
-                        parameters['search_engine_id'] = self.search_engine_id
+                        try:
+                            context_module = importlib.import_module(f'.tools.{tool_name_normalized}.context', package='ultragpt')
+                            context_module.set_credentials(self.google_api_key, self.search_engine_id)
+                        except ImportError:
+                            pass  # Context module not available
                     
                     result = execute_function(parameters)
+                    
+                    # Clear credentials after execution
+                    if tool_name_normalized == "web_search":
+                        try:
+                            context_module.clear_credentials()
+                        except:
+                            pass
+                    
                     return result if result else ""
                 else:
                     return f"No execute_tool function found for {tool_name_normalized}"
@@ -164,14 +171,25 @@ class ToolManager:
 
     def execute_tools(
         self,
-        message: str,
         history: list,
         tools: list,
         tools_config: dict
-    ) -> str:
-        """Execute tools using native AI tool calling - completely refactored approach"""
-        if not tools:
-            return ""
+    ) -> tuple:
+        """Execute tools using native AI tool calling - returns (result_string, tool_usage_details)"""
+        tool_usage_details = []
+        
+        if not tools or not history:
+            return "", tool_usage_details
+        
+        # Get the latest user message from history
+        message = ""
+        for msg in reversed(history):
+            if msg.get("role") == "user" and msg.get("content"):
+                message = msg["content"]
+                break
+        
+        if not message:
+            return "", tool_usage_details
         
         try:
             self.log.info(f"Loading and executing {len(tools)} tools using native AI tool calling")
@@ -184,7 +202,7 @@ class ToolManager:
             loaded_tools = self.load_internal_tools(tools)
             if not loaded_tools:
                 self.log.warning("No tools could be loaded")
-                return ""
+                return "", tool_usage_details
             
             # Convert to native tool format
             native_tools = self.convert_internal_tools_to_native_format(loaded_tools)
@@ -259,7 +277,7 @@ IMPORTANT:
             if not response_message.get('tool_calls'):
                 if self.verbose:
                     self.log.debug("AI decided no tools are needed")
-                return ""
+                return "", tool_usage_details
             
             # Execute the selected tools
             tool_results = []
@@ -285,12 +303,22 @@ IMPORTANT:
                         
                         # Execute the tool with the AI-selected parameters
                         tool_result = self.execute_internal_tool_with_params(
-                            tool_config, function_args, message, history, tools_config
+                            tool_config, function_args, tools_config
                         )
                         
                         tool_results.append({
                             "tool": tool_config['display_name'],
                             "response": tool_result
+                        })
+                        
+                        # Track tool usage
+                        tool_usage_details.append({
+                            "tool_name": function_name,
+                            "display_name": tool_config['display_name'],
+                            "parameters": function_args,
+                            "result": tool_result,
+                            "success": True,
+                            "error": None
                         })
                         
                         if self.verbose:
@@ -300,17 +328,28 @@ IMPORTANT:
                             self.log.debug("-" * 40)
                             
                     except Exception as e:
+                        error_msg = f"Tool execution failed: {str(e)}"
                         self.log.error(f"Tool {function_name} execution failed: {str(e)}")
                         tool_results.append({
                             "tool": tool_config['display_name'],
-                            "response": f"Tool execution failed: {str(e)}"
+                            "response": error_msg
+                        })
+                        
+                        # Track failed tool usage
+                        tool_usage_details.append({
+                            "tool_name": function_name,
+                            "display_name": tool_config['display_name'],
+                            "parameters": function_args,
+                            "result": None,
+                            "success": False,
+                            "error": str(e)
                         })
                 else:
                     self.log.warning(f"Unknown tool called: {function_name}")
             
             # Format results
             if not tool_results:
-                return ""
+                return "", tool_usage_details
                 
             formatted_responses = []
             for result in tool_results:
@@ -326,13 +365,13 @@ IMPORTANT:
             if self.verbose:
                 self.log.debug(f"✓ Tools execution completed ({success_count}/{len(tool_results)} successful)")
                 
-            return "\n\n".join(formatted_responses)
+            return "\n\n".join(formatted_responses), tool_usage_details
                 
         except Exception as e:
             self.log.error(f"Tool execution failed: {str(e)}")
             if self.verbose:
                 self.log.debug(f"✗ Tool execution failed: {str(e)}")
-            return ""
+            return "", tool_usage_details
 
     def convert_user_tools_to_native_format(self, user_tools: list) -> list:
         """Convert UserTool objects to native AI provider tool format"""
