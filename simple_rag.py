@@ -1,10 +1,14 @@
 """
 Simple Search-based RAG System for UltraGPT
 A lightweight RAG system that uses keyword matching instead of vector search.
+Now with persistent file-based storage for efficient reuse.
 """
 
 import re
 import string
+import json
+import os
+from pathlib import Path
 from collections import defaultdict, Counter
 from typing import List, Dict, Tuple, Optional
 import hashlib
@@ -12,21 +16,125 @@ import hashlib
 class SimpleRAG:
     """
     A simple search-based RAG system that uses keyword matching for retrieval.
+    Features persistent file-based storage for efficient reuse.
     """
     
-    def __init__(self, chunk_size: int = 500, overlap: int = 50):
+    def __init__(self, storage_dir: str, chunk_size: int = 500, overlap: int = 50):
         """
-        Initialize the SimpleRAG system.
+        Initialize the SimpleRAG system with persistent storage.
         
         Args:
+            storage_dir (str): Directory to store chunked data and indices
             chunk_size (int): Maximum size of each text chunk
             overlap (int): Number of characters to overlap between chunks
         """
+        self.storage_dir = Path(storage_dir)
         self.chunk_size = chunk_size
         self.overlap = overlap
+        
+        # Create storage directory if it doesn't exist
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        
+        # File paths for persistent storage
+        self.documents_file = self.storage_dir / "documents.json"
+        self.label_index_file = self.storage_dir / "label_index.json"
+        self.keyword_index_file = self.storage_dir / "keyword_index.json"
+        self.config_file = self.storage_dir / "config.json"
+        
+        # Initialize data structures
         self.documents = {}  # {doc_id: {"label": str, "chunks": List[str], "keywords": List[set]}}
         self.label_index = defaultdict(list)  # {label: [doc_ids]}
         self.keyword_index = defaultdict(set)  # {keyword: {doc_ids}}
+        
+        # Load existing data if available
+        self._load_from_disk()
+        
+    def _save_to_disk(self):
+        """Save all data structures to disk."""
+        try:
+            # Save configuration
+            config = {
+                "chunk_size": self.chunk_size,
+                "overlap": self.overlap,
+                "version": "1.0"
+            }
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2)
+            
+            # Convert sets to lists for JSON serialization
+            documents_serializable = {}
+            for doc_id, doc in self.documents.items():
+                documents_serializable[doc_id] = {
+                    "label": doc["label"],
+                    "content": doc["content"],
+                    "chunks": doc["chunks"],
+                    "keywords": [list(keywords) for keywords in doc["keywords"]]
+                }
+            
+            # Save documents
+            with open(self.documents_file, 'w', encoding='utf-8') as f:
+                json.dump(documents_serializable, f, indent=2)
+            
+            # Save label index
+            with open(self.label_index_file, 'w', encoding='utf-8') as f:
+                json.dump(dict(self.label_index), f, indent=2)
+            
+            # Save keyword index (convert sets to lists)
+            keyword_index_serializable = {}
+            for keyword, doc_ids in self.keyword_index.items():
+                keyword_index_serializable[keyword] = list(doc_ids)
+            
+            with open(self.keyword_index_file, 'w', encoding='utf-8') as f:
+                json.dump(keyword_index_serializable, f, indent=2)
+                
+        except Exception as e:
+            print(f"Warning: Failed to save RAG data to disk: {e}")
+    
+    def _load_from_disk(self):
+        """Load existing data from disk if available."""
+        try:
+            # Check if files exist
+            if not all([f.exists() for f in [self.documents_file, self.label_index_file, self.keyword_index_file]]):
+                print(f"No existing RAG data found in {self.storage_dir}. Starting fresh.")
+                return
+            
+            # Load configuration and validate compatibility
+            if self.config_file.exists():
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    if config.get("chunk_size") != self.chunk_size or config.get("overlap") != self.overlap:
+                        print(f"Warning: Existing data has different chunk settings. Existing: chunk_size={config.get('chunk_size')}, overlap={config.get('overlap')}. Current: chunk_size={self.chunk_size}, overlap={self.overlap}")
+            
+            # Load documents
+            with open(self.documents_file, 'r', encoding='utf-8') as f:
+                documents_data = json.load(f)
+                for doc_id, doc in documents_data.items():
+                    self.documents[doc_id] = {
+                        "label": doc["label"],
+                        "content": doc["content"],
+                        "chunks": doc["chunks"],
+                        "keywords": [set(keywords) for keywords in doc["keywords"]]
+                    }
+            
+            # Load label index
+            with open(self.label_index_file, 'r', encoding='utf-8') as f:
+                label_data = json.load(f)
+                self.label_index = defaultdict(list, label_data)
+            
+            # Load keyword index
+            with open(self.keyword_index_file, 'r', encoding='utf-8') as f:
+                keyword_data = json.load(f)
+                self.keyword_index = defaultdict(set)
+                for keyword, doc_ids in keyword_data.items():
+                    self.keyword_index[keyword] = set(doc_ids)
+            
+            print(f"Loaded existing RAG data: {len(self.documents)} documents, {len(self.label_index)} labels, {len(self.keyword_index)} keywords")
+            
+        except Exception as e:
+            print(f"Warning: Failed to load existing RAG data: {e}. Starting fresh.")
+            self.documents = {}
+            self.label_index = defaultdict(list)
+            self.keyword_index = defaultdict(set)
         
     def _normalize_text(self, text: str) -> str:
         """Normalize text by converting to lowercase and removing punctuation."""
@@ -136,6 +244,9 @@ class SimpleRAG:
         # Update label index
         self.label_index[label].append(doc_id)
         
+        # Save to disk after adding new document
+        self._save_to_disk()
+        
         return doc_id
     
     def add_documents_from_list(self, documents: List[str], label: str) -> List[str]:
@@ -153,6 +264,10 @@ class SimpleRAG:
         for i, doc in enumerate(documents):
             doc_id = self.add_document(doc, label, f"{label}_doc_{i}")
             doc_ids.append(doc_id)
+        
+        # Note: _save_to_disk() is called by add_document() for each document
+        # For bulk operations, we could optimize this, but it ensures data consistency
+        
         return doc_ids
     
     def search(self, query: str, top_k: int = 5, labels: Optional[List[str]] = None) -> List[Tuple[str, float, str, str]]:
@@ -263,10 +378,17 @@ class SimpleRAG:
         }
     
     def clear(self):
-        """Clear all documents from the RAG system."""
+        """Clear all documents from the RAG system and delete stored files."""
         self.documents.clear()
         self.label_index.clear()
         self.keyword_index.clear()
+        
+        # Delete storage files
+        for file_path in [self.documents_file, self.label_index_file, self.keyword_index_file, self.config_file]:
+            if file_path.exists():
+                file_path.unlink()
+        
+        print(f"Cleared all RAG data from {self.storage_dir}")
     
     def remove_label(self, label: str):
         """Remove all documents with a specific label."""
@@ -289,3 +411,73 @@ class SimpleRAG:
         
         # Remove label
         del self.label_index[label]
+        
+        # Save changes to disk
+        self._save_to_disk()
+        
+        print(f"Removed {len(doc_ids_to_remove)} documents with label '{label}'")
+    
+    def add_documents_bulk(self, documents_dict: Dict[str, List[str]], auto_save: bool = True):
+        """
+        Add multiple documents efficiently with bulk operations.
+        
+        Args:
+            documents_dict (Dict[str, List[str]]): {label: [documents]} format
+            auto_save (bool): Whether to save to disk after bulk operation
+        """
+        total_added = 0
+        for label, documents in documents_dict.items():
+            for i, doc in enumerate(documents):
+                doc_id = f"{label}_doc_{len(self.label_index[label]) + i}"
+                
+                # Chunk the content
+                chunks = self._chunk_text(doc)
+                
+                # Extract keywords for each chunk
+                chunk_keywords = []
+                for chunk in chunks:
+                    keywords = self._extract_keywords(chunk)
+                    chunk_keywords.append(keywords)
+                    
+                    # Update keyword index
+                    for keyword in keywords:
+                        self.keyword_index[keyword].add(doc_id)
+                
+                # Store document
+                self.documents[doc_id] = {
+                    "label": label,
+                    "content": doc,
+                    "chunks": chunks,
+                    "keywords": chunk_keywords
+                }
+                
+                # Update label index
+                self.label_index[label].append(doc_id)
+                total_added += 1
+        
+        if auto_save:
+            self._save_to_disk()
+        
+        print(f"Added {total_added} documents in bulk operation")
+        return total_added
+    
+    def get_storage_info(self) -> Dict:
+        """Get information about the storage directory and files."""
+        storage_info = {
+            "storage_dir": str(self.storage_dir),
+            "storage_exists": self.storage_dir.exists(),
+            "files": {}
+        }
+        
+        for file_name, file_path in [
+            ("documents", self.documents_file),
+            ("label_index", self.label_index_file),
+            ("keyword_index", self.keyword_index_file),
+            ("config", self.config_file)
+        ]:
+            storage_info["files"][file_name] = {
+                "exists": file_path.exists(),
+                "size_bytes": file_path.stat().st_size if file_path.exists() else 0
+            }
+        
+        return storage_info

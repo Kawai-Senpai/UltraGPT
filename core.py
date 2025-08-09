@@ -37,6 +37,7 @@ class UltraGPT:
         log_to_file: bool = False,
         log_to_console: bool = False,
         log_level: str = 'DEBUG',
+        rag_system: Optional[SimpleRAG] = None,
         rag_documents: Optional[dict] = None,
         rag_chunk_size: int = 500,
         rag_overlap: int = 50,
@@ -56,9 +57,10 @@ class UltraGPT:
             log_to_file (bool, optional): Whether to log to a file. Defaults to False.
             log_to_console (bool, optional): Whether to log to console. Defaults to True.
             log_level (str, optional): The logging level. Defaults to 'DEBUG'.
-            rag_documents (dict, optional): RAG documents to initialize. Format: {label: text_or_list}. Defaults to None.
-            rag_chunk_size (int, optional): Chunk size for RAG documents. Defaults to 500.
-            rag_overlap (int, optional): Overlap size for RAG chunks. Defaults to 50.
+            rag_system (SimpleRAG, optional): Pre-initialized SimpleRAG object for document retrieval. If provided, rag_documents will be ignored.
+            rag_documents (dict, optional): RAG documents to initialize. Format: {label: text_or_list}. Only used if rag_system is None. Defaults to None.
+            rag_chunk_size (int, optional): Chunk size for RAG documents. Only used if rag_system is None. Defaults to 500.
+            rag_overlap (int, optional): Overlap size for RAG chunks. Only used if rag_system is None. Defaults to 50.
         Raises:
             ValueError: If no API keys are provided or if an invalid tool is provided.
         """
@@ -113,11 +115,21 @@ class UltraGPT:
         # Initialize ToolManager
         self.tool_manager = ToolManager(self)
         
-        # Initialize SimpleRAG system
-        self.rag = SimpleRAG(chunk_size=rag_chunk_size, overlap=rag_overlap)
+        # Initialize or use provided SimpleRAG system
+        if rag_system is not None:
+            self.rag = rag_system
+            if self.verbose:
+                self.log.debug(f"Using provided RAG system with {len(self.rag.documents)} documents")
+        else:
+            # Create new SimpleRAG system (deprecated approach for backward compatibility)
+            self.rag = SimpleRAG(storage_dir="rag_storage", chunk_size=rag_chunk_size, overlap=rag_overlap)
+            if self.verbose:
+                self.log.debug("Created new temporary RAG system")
         
-        # Initialize RAG documents if provided
-        if rag_documents:
+        # Initialize RAG documents if provided (only for backward compatibility)
+        if rag_documents is not None and rag_system is None:
+            if self.verbose:
+                self.log.debug("Initializing RAG documents (deprecated approach)")
             for label, content in rag_documents.items():
                 if isinstance(content, list):
                     self.rag.add_documents_from_list(content, label)
