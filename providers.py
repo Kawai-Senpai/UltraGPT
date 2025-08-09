@@ -109,7 +109,7 @@ class OpenAIProvider(BaseProvider):
             kwargs["temperature"] = temperature
         
         # Only add max_tokens if it's not None
-        if max_tokens is not None:
+        if max_tokens is not None and self._should_include_max_tokens(model):
             kwargs["max_tokens"] = max_tokens
             
         response = self.client.beta.chat.completions.parse(**kwargs)
@@ -133,7 +133,7 @@ class OpenAIProvider(BaseProvider):
             kwargs["temperature"] = temperature
         
         # Only add max_tokens if it's not None
-        if max_tokens is not None:
+        if max_tokens is not None and self._should_include_max_tokens(model):
             kwargs["max_tokens"] = max_tokens
             
         # Add parallel_tool_calls if specified (OpenAI specific)
@@ -169,11 +169,23 @@ class OpenAIProvider(BaseProvider):
 class ClaudeProvider(BaseProvider):
     """Anthropic Claude provider implementation"""
     
+    # Model name prefixes that don't support temperature parameter
+    NO_TEMPERATURE_MODELS = []
+    NO_MAX_TOKENS_MODELS = []
+
     def __init__(self, api_key: str, **kwargs):
         super().__init__(api_key, **kwargs)
         if Anthropic is None:
             raise ImportError("anthropic package is required for Claude support. Install with: pip install anthropic")
         self.client = Anthropic(api_key=api_key)
+
+    def _should_include_temperature(self, model: str) -> bool:
+        """Check if model supports temperature parameter"""
+        return not any(prefix in model for prefix in self.NO_TEMPERATURE_MODELS)
+    
+    def _should_include_max_tokens(self, model: str) -> bool:
+        """Check if model supports max_tokens parameter"""
+        return not any(prefix in model for prefix in self.NO_MAX_TOKENS_MODELS)
         
     def convert_messages(self, messages: List[Dict]) -> tuple:
         """
@@ -249,12 +261,15 @@ class ClaudeProvider(BaseProvider):
         
         kwargs = {
             "model": model,
-            "messages": converted_messages,
-            "temperature": temperature
+            "messages": converted_messages
         }
+
+        # Only add temperature if model supports it
+        if self._should_include_temperature(model):
+            kwargs["temperature"] = temperature 
         
         # Only add max_tokens if it's not None
-        if max_tokens is not None:
+        if max_tokens is not None and self._should_include_max_tokens(model):
             kwargs["max_tokens"] = max_tokens
         
         if system_prompt:
@@ -295,13 +310,16 @@ class ClaudeProvider(BaseProvider):
         kwargs = {
             "model": model,
             "messages": converted_messages,
-            "temperature": temperature,
             "tools": [tool],
             "tool_choice": {"type": "tool", "name": tool_name}  # Force using the tool
         }
         
+        # Only add temperature if model supports it
+        if self._should_include_temperature(model):
+            kwargs["temperature"] = temperature
+
         # Only add max_tokens if it's not None
-        if max_tokens is not None:
+        if max_tokens is not None and self._should_include_max_tokens(model):
             kwargs["max_tokens"] = max_tokens
         
         if system_prompt:
@@ -356,13 +374,16 @@ class ClaudeProvider(BaseProvider):
         kwargs = {
             "model": model,
             "messages": converted_messages,
-            "temperature": temperature,
             "tools": claude_tools,  # Use converted Claude tools
             "tool_choice": {"type": "any"}  # Always require the AI to choose at least one tool
         }
+
+        # Only add temperature if model supports it
+        if self._should_include_temperature(model):
+            kwargs["temperature"] = temperature
         
         # Only add max_tokens if it's not None
-        if max_tokens is not None:
+        if max_tokens is not None and self._should_include_max_tokens(model):
             kwargs["max_tokens"] = max_tokens
         
         # Handle parallel tool calls (Claude uses disable_parallel_tool_use)
