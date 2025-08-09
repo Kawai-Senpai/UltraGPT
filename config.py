@@ -43,4 +43,4 @@ TOOLS_CONFIG = {
 }
 
 # Default Tools List
-DEFAULT_TOOLS = ["web-search", "calculator", "math-operations"]
+DEFAULT_TOOLS = []

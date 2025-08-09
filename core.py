@@ -12,7 +12,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from ultraprint.logging import logger
 from .providers import ProviderManager, OpenAIProvider, ClaudeProvider
 from .tools_manager import ToolManager
-from typing import Optional
+from .simple_rag import SimpleRAG
+from typing import Optional, List
 import os
 import importlib
 import inspect
@@ -36,6 +37,9 @@ class UltraGPT:
         log_to_file: bool = False,
         log_to_console: bool = False,
         log_level: str = 'DEBUG',
+        rag_documents: Optional[dict] = None,
+        rag_chunk_size: int = 500,
+        rag_overlap: int = 50,
     ):
         """
         Initialize the UltraGPT class with multi-provider support.
@@ -52,6 +56,9 @@ class UltraGPT:
             log_to_file (bool, optional): Whether to log to a file. Defaults to False.
             log_to_console (bool, optional): Whether to log to console. Defaults to True.
             log_level (str, optional): The logging level. Defaults to 'DEBUG'.
+            rag_documents (dict, optional): RAG documents to initialize. Format: {label: text_or_list}. Defaults to None.
+            rag_chunk_size (int, optional): Chunk size for RAG documents. Defaults to 500.
+            rag_overlap (int, optional): Overlap size for RAG chunks. Defaults to 50.
         Raises:
             ValueError: If no API keys are provided or if an invalid tool is provided.
         """
@@ -105,6 +112,19 @@ class UltraGPT:
         
         # Initialize ToolManager
         self.tool_manager = ToolManager(self)
+        
+        # Initialize SimpleRAG system
+        self.rag = SimpleRAG(chunk_size=rag_chunk_size, overlap=rag_overlap)
+        
+        # Initialize RAG documents if provided
+        if rag_documents:
+            for label, content in rag_documents.items():
+                if isinstance(content, list):
+                    self.rag.add_documents_from_list(content, label)
+                else:
+                    self.rag.add_document(content, label)
+                if self.verbose:
+                    self.log.debug(f"Added RAG documents for label '{label}'")
 
     def chat_with_ai_sync(
         self,
@@ -407,17 +427,28 @@ IMPORTANT TOOL USAGE GUIDELINES:
             processed.append(message)
         return processed
 
-    def append_message_to_system(self, messages: list, new_message: dict):
+    def append_message_to_system(self, messages: list, new_message: str):
         # add message after system message
         processed = []
+        has_system_message = False
+        
         for message in messages:
             if message["role"] == "system" or message["role"] == "developer":
                 processed.append({
                     "role": message["role"],
                     "content": f"{message['content']}\n{new_message}"
                 })
+                has_system_message = True
             else:
                 processed.append(message)
+        
+        # If no system message exists, add one at the beginning
+        if not has_system_message:
+            processed.insert(0, {
+                "role": "system",
+                "content": new_message
+            })
+        
         return processed
     
     def integrate_tool_call_prompt(self, messages: list, tool_prompt: str) -> list:
@@ -602,13 +633,16 @@ IMPORTANT TOOL USAGE GUIDELINES:
         temperature: float = None,
         max_tokens: Optional[int] = None,  # Override instance default if provided
         reasoning_iterations: int = None,
-        steps_pipeline: bool = True,
-        reasoning_pipeline: bool = True,
+        steps_pipeline: bool = False,
+        reasoning_pipeline: bool = False,
         steps_model: str = None,
         reasoning_model: str = None,
         tools: list = None,
         tools_config: dict = None,
-        deepthink: Optional[bool] = None
+        deepthink: Optional[bool] = None,
+        rag_enabled: bool = True,
+        rag_labels: Optional[List[str]] = None,
+        rag_top_k: int = 3
     ):
         """
         Initiates a chat session with the given messages and optional schema.
@@ -625,6 +659,9 @@ IMPORTANT TOOL USAGE GUIDELINES:
             reasoning_model (str, optional): Specific model for reasoning pipeline. Format: "provider:model" or just "model". Uses main model if None.
             tools (list, optional): The list of tools to enable. Defaults to ["web-search", "calculator", "math-operations"].
             tools_config (dict, optional): The configuration for the tools. Each tool's "model" field supports "provider:model" format. Defaults to predefined configurations.
+            rag_enabled (bool, optional): Whether to use RAG for context retrieval. Defaults to True.
+            rag_labels (Optional[List[str]], optional): Filter RAG search by specific labels. Defaults to None (search all).
+            rag_top_k (int, optional): Number of top RAG results to include. Defaults to 3.
         Returns:
             tuple: A tuple containing the final output, total tokens used, and a details dictionary.
                 - final_output: The final response from the chat model.
@@ -693,6 +730,38 @@ IMPORTANT TOOL USAGE GUIDELINES:
             prompt = combine_all_pipeline_prompts(reasoning_output, conclusion)
             messages = self.add_message_before_system(messages, {"role": "user", "content": prompt})
 
+        # Add RAG context if enabled and documents exist
+        rag_context = ""
+        if rag_enabled and self.rag.documents:
+            # Extract user query for RAG search
+            user_query = ""
+            system_content = ""
+            
+            # Get the latest user message and any system message
+            for msg in reversed(messages):
+                if msg.get("role") == "user" and not user_query:
+                    user_query = msg.get("content", "")
+                elif msg.get("role") in ["system", "developer"] and not system_content:
+                    system_content = msg.get("content", "")
+            
+            if user_query:
+                rag_context = self.rag.get_relevant_context(
+                    query=user_query,
+                    system_message=system_content,
+                    top_k=rag_top_k,
+                    labels=rag_labels
+                )
+                
+                if rag_context:
+                    messages = self.append_message_to_system(messages, rag_context)
+                    if self.verbose:
+                        self.log.debug(f"Added RAG context ({rag_top_k} chunks)")
+                        self.log.debug(f"RAG context content preview: {rag_context[:200]}...")
+                        # Log the system message after RAG injection
+                        for msg in messages:
+                            if msg.get("role") in ["system", "developer"]:
+                                self.log.debug(f"Final system message preview: {msg['content'][:300]}...")
+
         if schema:
             final_output, tokens, final_details = self.chat_with_model_parse(messages, schema=schema, model=model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens, deepthink=deepthink)
         else:
@@ -749,8 +818,8 @@ IMPORTANT TOOL USAGE GUIDELINES:
         model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)
         temperature: float = None,
         reasoning_iterations: int = None,
-        steps_pipeline: bool = True,
-        reasoning_pipeline: bool = True,
+        steps_pipeline: bool = False,
+        reasoning_pipeline: bool = False,
         steps_model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)  
         reasoning_model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)
         tools: list = None,
