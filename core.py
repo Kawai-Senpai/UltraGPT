@@ -3,23 +3,17 @@ from .prompts import (
 generate_steps_prompt, 
 each_step_prompt, generate_reasoning_prompt, 
 generate_conclusion_prompt, combine_all_pipeline_prompts,
-make_tool_analysis_prompt, generate_tool_call_prompt,
 generate_single_tool_call_prompt, generate_multiple_tool_call_prompt
 )
-from pydantic import BaseModel
-from .schemas import Steps, Reasoning, ToolAnalysisSchema, UserTool, ExpertTool
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from .schemas import Steps, Reasoning
+from concurrent.futures import ThreadPoolExecutor
 from ultraprint.logging import logger
 from .providers import ProviderManager, OpenAIProvider, ClaudeProvider
 from .tools_manager import ToolManager
 from .simple_rag import SimpleRAG
 from typing import Optional, List
-import os
-import importlib
-import inspect
 from . import config
 
-from itertools import islice
 
 class UltraGPT:
     def __init__(
@@ -38,9 +32,6 @@ class UltraGPT:
         log_to_console: bool = False,
         log_level: str = 'DEBUG',
         rag_system: Optional[SimpleRAG] = None,
-        rag_documents: Optional[dict] = None,
-        rag_chunk_size: int = 500,
-        rag_overlap: int = 50,
     ):
         """
         Initialize the UltraGPT class with multi-provider support.
@@ -57,10 +48,7 @@ class UltraGPT:
             log_to_file (bool, optional): Whether to log to a file. Defaults to False.
             log_to_console (bool, optional): Whether to log to console. Defaults to True.
             log_level (str, optional): The logging level. Defaults to 'DEBUG'.
-            rag_system (SimpleRAG, optional): Pre-initialized SimpleRAG object for document retrieval. If provided, rag_documents will be ignored.
-            rag_documents (dict, optional): RAG documents to initialize. Format: {label: text_or_list}. Only used if rag_system is None. Defaults to None.
-            rag_chunk_size (int, optional): Chunk size for RAG documents. Only used if rag_system is None. Defaults to 500.
-            rag_overlap (int, optional): Overlap size for RAG chunks. Only used if rag_system is None. Defaults to 50.
+            rag_system (SimpleRAG, optional): Pre-initialized SimpleRAG object for document retrieval. If not provided, RAG functionality will be disabled.
         Raises:
             ValueError: If no API keys are provided or if an invalid tool is provided.
         """
@@ -115,28 +103,16 @@ class UltraGPT:
         # Initialize ToolManager
         self.tool_manager = ToolManager(self)
         
-        # Initialize or use provided SimpleRAG system
+        # Initialize RAG system only if provided
+        self.rag = None
         if rag_system is not None:
             self.rag = rag_system
             if self.verbose:
                 self.log.debug(f"Using provided RAG system with {len(self.rag.documents)} documents")
         else:
-            # Create new SimpleRAG system (deprecated approach for backward compatibility)
-            self.rag = SimpleRAG(storage_dir="rag_storage", chunk_size=rag_chunk_size, overlap=rag_overlap)
+            # No RAG system provided - RAG functionality disabled
             if self.verbose:
-                self.log.debug("Created new temporary RAG system")
-        
-        # Initialize RAG documents if provided (only for backward compatibility)
-        if rag_documents is not None and rag_system is None:
-            if self.verbose:
-                self.log.debug("Initializing RAG documents (deprecated approach)")
-            for label, content in rag_documents.items():
-                if isinstance(content, list):
-                    self.rag.add_documents_from_list(content, label)
-                else:
-                    self.rag.add_document(content, label)
-                if self.verbose:
-                    self.log.debug(f"Added RAG documents for label '{label}'")
+                self.log.debug("No RAG system provided - RAG functionality disabled")
 
     def chat_with_ai_sync(
         self,
@@ -742,9 +718,9 @@ IMPORTANT TOOL USAGE GUIDELINES:
             prompt = combine_all_pipeline_prompts(reasoning_output, conclusion)
             messages = self.add_message_before_system(messages, {"role": "user", "content": prompt})
 
-        # Add RAG context if enabled and documents exist
+        # Add RAG context if enabled and RAG system exists with documents
         rag_context = ""
-        if rag_enabled and self.rag.documents:
+        if rag_enabled and self.rag is not None and self.rag.documents:
             # Extract user query for RAG search
             user_query = ""
             system_content = ""

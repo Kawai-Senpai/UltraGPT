@@ -5,13 +5,12 @@ Now with persistent file-based storage for efficient reuse.
 """
 
 import re
-import string
 import json
-import os
 from pathlib import Path
-from collections import defaultdict, Counter
+from collections import defaultdict
 from typing import List, Dict, Tuple, Optional
 import hashlib
+from ultraprint.logging import logger
 
 class SimpleRAG:
     """
@@ -19,7 +18,19 @@ class SimpleRAG:
     Features persistent file-based storage for efficient reuse.
     """
     
-    def __init__(self, storage_dir: str, chunk_size: int = 500, overlap: int = 50):
+    def __init__(
+        self, 
+        storage_dir: str, 
+        chunk_size: int = 500, 
+        overlap: int = 50, 
+        verbose: bool = False,
+        logger_name: str = 'simple_rag',
+        logger_filename: str = 'debug/simple_rag.log',
+        log_extra_info: bool = False,
+        log_to_file: bool = False,
+        log_to_console: bool = False,
+        log_level: str = 'DEBUG'
+    ):
         """
         Initialize the SimpleRAG system with persistent storage.
         
@@ -27,10 +38,28 @@ class SimpleRAG:
             storage_dir (str): Directory to store chunked data and indices
             chunk_size (int): Maximum size of each text chunk
             overlap (int): Number of characters to overlap between chunks
+            verbose (bool): Enable verbose logging
+            logger_name (str): Name for the logger instance
+            logger_filename (str): Filename for log output
+            log_extra_info (bool): Include extra info in logs
+            log_to_file (bool): Write logs to file
+            log_to_console (bool): Write logs to console
+            log_level (str): Logging level
         """
         self.storage_dir = Path(storage_dir)
         self.chunk_size = chunk_size
         self.overlap = overlap
+        self.verbose = verbose
+        
+        # Initialize logger with consistent parameters like UltraGPT core
+        self.log = logger(
+            name=logger_name,
+            filename=logger_filename,
+            include_extra_info=log_extra_info,
+            write_to_file=log_to_file,
+            log_level=log_level,
+            log_to_console=True if verbose else log_to_console
+        )
         
         # Create storage directory if it doesn't exist
         self.storage_dir.mkdir(parents=True, exist_ok=True)
@@ -88,14 +117,14 @@ class SimpleRAG:
                 json.dump(keyword_index_serializable, f, indent=2)
                 
         except Exception as e:
-            print(f"Warning: Failed to save RAG data to disk: {e}")
+            self.log.warning(f"Failed to save RAG data to disk: {e}")
     
     def _load_from_disk(self):
         """Load existing data from disk if available."""
         try:
             # Check if files exist
             if not all([f.exists() for f in [self.documents_file, self.label_index_file, self.keyword_index_file]]):
-                print(f"No existing RAG data found in {self.storage_dir}. Starting fresh.")
+                self.log.info(f"No existing RAG data found in {self.storage_dir}. Starting fresh.")
                 return
             
             # Load configuration and validate compatibility
@@ -103,7 +132,7 @@ class SimpleRAG:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
                     if config.get("chunk_size") != self.chunk_size or config.get("overlap") != self.overlap:
-                        print(f"Warning: Existing data has different chunk settings. Existing: chunk_size={config.get('chunk_size')}, overlap={config.get('overlap')}. Current: chunk_size={self.chunk_size}, overlap={self.overlap}")
+                        self.log.warning(f"Existing data has different chunk settings. Existing: chunk_size={config.get('chunk_size')}, overlap={config.get('overlap')}. Current: chunk_size={self.chunk_size}, overlap={self.overlap}")
             
             # Load documents
             with open(self.documents_file, 'r', encoding='utf-8') as f:
@@ -128,10 +157,10 @@ class SimpleRAG:
                 for keyword, doc_ids in keyword_data.items():
                     self.keyword_index[keyword] = set(doc_ids)
             
-            print(f"Loaded existing RAG data: {len(self.documents)} documents, {len(self.label_index)} labels, {len(self.keyword_index)} keywords")
+            self.log.info(f"Loaded existing RAG data: {len(self.documents)} documents, {len(self.label_index)} labels, {len(self.keyword_index)} keywords")
             
         except Exception as e:
-            print(f"Warning: Failed to load existing RAG data: {e}. Starting fresh.")
+            self.log.warning(f"Failed to load existing RAG data: {e}. Starting fresh.")
             self.documents = {}
             self.label_index = defaultdict(list)
             self.keyword_index = defaultdict(set)
@@ -388,7 +417,7 @@ class SimpleRAG:
             if file_path.exists():
                 file_path.unlink()
         
-        print(f"Cleared all RAG data from {self.storage_dir}")
+        self.log.info(f"Cleared all RAG data from {self.storage_dir}")
     
     def remove_label(self, label: str):
         """Remove all documents with a specific label."""
@@ -415,7 +444,7 @@ class SimpleRAG:
         # Save changes to disk
         self._save_to_disk()
         
-        print(f"Removed {len(doc_ids_to_remove)} documents with label '{label}'")
+        self.log.info(f"Removed {len(doc_ids_to_remove)} documents with label '{label}'")
     
     def add_documents_bulk(self, documents_dict: Dict[str, List[str]], auto_save: bool = True):
         """
@@ -458,7 +487,7 @@ class SimpleRAG:
         if auto_save:
             self._save_to_disk()
         
-        print(f"Added {total_added} documents in bulk operation")
+        self.log.info(f"Added {total_added} documents in bulk operation")
         return total_added
     
     def get_storage_info(self) -> Dict:
