@@ -351,7 +351,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
             # Add reasoning parameter
             parameters_schema["properties"]["reasoning"] = {
                 "type": "string",
-                "description": "Detailed reasoning for why this tool was chosen and how it will help solve the user's request"
+                "description": "Detailed reasoning for why this tool was chosen and how it will help solve the user's request. Write this in a user friendly way and organic, as if you are explaining to the user directly why you chose it and so on as if you are humanly reasoning through the problem. This will be shown to the user."
             }
             
             # Add stop_after_tool_call parameter  
