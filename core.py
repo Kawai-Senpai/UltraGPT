@@ -357,7 +357,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
             # Add stop_after_tool_call parameter  
             parameters_schema["properties"]["stop_after_tool_call"] = {
                 "type": "boolean",
-                "description": "Whether to stop execution after this tool call (true if task is complete or user input needed, false to continue with more tools)"
+                "description": "Whether to stop execution after this tool call (true if task is complete or user input needed, false to continue with more tools). It is suggested to not set this true immidiately after a important tool call, but rather after reviewing the result and then deciding if the tool worked properly or not."
             }
             
             # Ensure additionalProperties is false and required includes all properties for OpenAI strict mode
