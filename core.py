@@ -11,8 +11,9 @@ from ultraprint.logging import logger
 from .providers import ProviderManager, OpenAIProvider, ClaudeProvider
 from .tools_manager import ToolManager
 from .simple_rag import SimpleRAG
-from typing import Optional, List
+from typing import Optional, List, Dict, Union
 from . import config
+from .tools.web_search.core import google_search, scrape_url
 
 
 class UltraGPT:
@@ -1018,3 +1019,207 @@ IMPORTANT TOOL USAGE GUIDELINES:
                     self.log.debug("⚠ Invalid tool format: " + str(type(tool)))
         
         return validated_tools
+
+    #! Web Search Functionality -----------------------------------------------
+    def web_search(
+        self,
+        query: Optional[str] = None,
+        url: Optional[str] = None,
+        num_results: int = 5,
+        enable_scraping: bool = True,
+        max_scrape_length: int = 5000,
+        scrape_timeout: int = 15,
+        return_debug_info: bool = False
+    ) -> Union[List[Dict], Dict]:
+        """
+        Perform web search using Google Custom Search API and/or scrape specific URLs.
+        This is a standalone web search functionality that doesn't require AI.
+        
+        Args:
+            query (str, optional): Search query string for Google Custom Search
+            url (str, optional): Specific URL to scrape content from
+            num_results (int, optional): Number of search results to return (max 10). Defaults to 5.
+            enable_scraping (bool, optional): Whether to scrape content from search results. Defaults to True.
+            max_scrape_length (int, optional): Maximum length of scraped content per page. Defaults to 5000.
+            scrape_timeout (int, optional): Timeout for scraping requests in seconds. Defaults to 15.
+            return_debug_info (bool, optional): Whether to include debug information in response. Defaults to False.
+            
+        Returns:
+            Union[List[Dict], Dict]: Search results or scraped content with metadata
+            
+        Examples:
+            # Web search only
+            results = ultra.web_search(query="Python tutorials", num_results=3)
+            
+            # URL scraping only
+            content = ultra.web_search(url="https://example.com")
+            
+            # Web search with scraping disabled
+            results = ultra.web_search(query="AI news", enable_scraping=False)
+            
+        Raises:
+            ValueError: If neither query nor url is provided, or if Google API credentials are missing for search
+        """
+        
+        if not query and not url:
+            raise ValueError("Either 'query' for web search or 'url' for scraping must be provided")
+        
+        if self.verbose:
+            self.log.debug("=" * 50)
+            self.log.debug("Starting web search operation")
+            if query:
+                self.log.debug(f"Search query: {query}")
+            if url:
+                self.log.debug(f"Scraping URL: {url}")
+        
+        # URL scraping mode
+        if url:
+            if self.verbose:
+                self.log.debug(f"Scraping content from: {url}")
+            
+            try:
+                content = scrape_url(url, timeout=scrape_timeout, max_length=max_scrape_length)
+                
+                result = {
+                    "type": "url_scraping",
+                    "url": url,
+                    "success": content is not None,
+                    "content": content or "Unable to scrape content (blocked by robots.txt or error)",
+                    "content_length": len(content) if content else 0,
+                    "scraped_at": __import__('datetime').datetime.now().isoformat()
+                }
+                
+                if self.verbose:
+                    status = "✓ Success" if content else "✗ Failed"
+                    length = len(content) if content else 0
+                    self.log.debug(f"{status} - Content length: {length} characters")
+                
+                return result
+                
+            except Exception as e:
+                error_msg = f"Error scraping URL {url}: {str(e)}"
+                if self.verbose:
+                    self.log.error(error_msg)
+                
+                return {
+                    "type": "url_scraping",
+                    "url": url,
+                    "success": False,
+                    "content": "",
+                    "error": error_msg,
+                    "scraped_at": __import__('datetime').datetime.now().isoformat()
+                }
+        
+        # Web search mode
+        if query:
+            # Check for Google API credentials
+            api_key = self.google_api_key or __import__('os').getenv('GOOGLE_API_KEY')
+            search_engine_id = self.search_engine_id or __import__('os').getenv('GOOGLE_SEARCH_ENGINE_ID')
+            
+            if not api_key or not search_engine_id:
+                error_msg = "Google API credentials not configured. Please provide google_api_key and search_engine_id to UltraGPT constructor or set environment variables GOOGLE_API_KEY and GOOGLE_SEARCH_ENGINE_ID."
+                if self.verbose:
+                    self.log.error(error_msg)
+                raise ValueError(error_msg)
+            
+            if self.verbose:
+                self.log.debug(f"Performing Google search with {num_results} results")
+            
+            try:
+                # Perform Google search
+                search_results, debug_info = google_search(query, api_key, search_engine_id, num_results)
+                
+                if self.verbose:
+                    self.log.debug(f"Google API returned {len(search_results)} results")
+                
+                if not search_results:
+                    result = {
+                        "type": "web_search",
+                        "query": query,
+                        "results": [],
+                        "total_results": 0,
+                        "searched_at": __import__('datetime').datetime.now().isoformat(),
+                        "message": "No search results found"
+                    }
+                    
+                    if return_debug_info:
+                        result["debug_info"] = debug_info
+                    
+                    if self.verbose:
+                        self.log.debug("✗ No search results found")
+                    
+                    return result
+                
+                # Process search results
+                processed_results = []
+                for i, result in enumerate(search_results, 1):
+                    title = result.get("title", "")
+                    link = result.get("link", "")
+                    snippet = result.get("snippet", "")
+                    
+                    processed_result = {
+                        "rank": i,
+                        "title": title,
+                        "url": link,
+                        "snippet": snippet,
+                        "scraped_content": None,
+                        "scraping_success": False
+                    }
+                    
+                    # Optionally scrape content from each result
+                    if enable_scraping and link:
+                        if self.verbose:
+                            self.log.debug(f"Scraping result {i}: {title[:50]}...")
+                        
+                        try:
+                            scraped_content = scrape_url(link, timeout=scrape_timeout, max_length=max_scrape_length)
+                            if scraped_content:
+                                processed_result["scraped_content"] = scraped_content
+                                processed_result["scraping_success"] = True
+                                if self.verbose:
+                                    self.log.debug(f"  ✓ Scraped {len(scraped_content)} characters")
+                            else:
+                                if self.verbose:
+                                    self.log.debug(f"  ✗ Scraping failed (blocked or error)")
+                        except Exception as e:
+                            if self.verbose:
+                                self.log.debug(f"  ✗ Scraping error: {str(e)}")
+                    
+                    processed_results.append(processed_result)
+                
+                final_result = {
+                    "type": "web_search",
+                    "query": query,
+                    "results": processed_results,
+                    "total_results": len(processed_results),
+                    "scraping_enabled": enable_scraping,
+                    "searched_at": __import__('datetime').datetime.now().isoformat()
+                }
+                
+                if return_debug_info:
+                    final_result["debug_info"] = debug_info
+                
+                if self.verbose:
+                    scraped_count = sum(1 for r in processed_results if r["scraping_success"])
+                    self.log.debug(f"✓ Search completed: {len(processed_results)} results, {scraped_count} scraped")
+                
+                return final_result
+                
+            except Exception as e:
+                error_msg = f"Error performing web search for '{query}': {str(e)}"
+                if self.verbose:
+                    self.log.error(error_msg)
+                
+                result = {
+                    "type": "web_search",
+                    "query": query,
+                    "results": [],
+                    "total_results": 0,
+                    "error": error_msg,
+                    "searched_at": __import__('datetime').datetime.now().isoformat()
+                }
+                
+                if return_debug_info:
+                    result["debug_info"] = [f"ERROR: {error_msg}"]
+                
+                return result
