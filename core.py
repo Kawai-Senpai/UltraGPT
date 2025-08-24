@@ -1,4 +1,5 @@
 from openai import OpenAI 
+import tiktoken
 from .prompts import (
 generate_steps_prompt, 
 each_step_prompt, generate_reasoning_prompt, 
@@ -1223,3 +1224,174 @@ IMPORTANT TOOL USAGE GUIDELINES:
                     result["debug_info"] = [f"ERROR: {error_msg}"]
                 
                 return result
+
+    # Token Management Functions
+    def count_tokens(self, content: Union[str, List[Dict]], model: str = "gpt-4") -> int:
+        """
+        Count tokens in a string or list of messages using tiktoken.
+        
+        Args:
+            content (Union[str, List[Dict]]): String content or list of OpenAI message format
+            model (str): Model name for tokenizer (default: gpt-4)
+            
+        Returns:
+            int: Number of tokens
+        """
+        try:
+            # Get the encoding for the model
+            try:
+                encoding = tiktoken.encoding_for_model(model)
+            except KeyError:
+                # If model not found, use cl100k_base (GPT-4 encoding)
+                encoding = tiktoken.get_encoding("cl100k_base")
+            
+            if isinstance(content, str):
+                # Simple string token count
+                return len(encoding.encode(content))
+            
+            elif isinstance(content, list):
+                # OpenAI messages format
+                total_tokens = 0
+                
+                for message in content:
+                    if isinstance(message, dict):
+                        # Count tokens in role
+                        if 'role' in message:
+                            total_tokens += len(encoding.encode(message['role']))
+                        
+                        # Count tokens in content
+                        if 'content' in message:
+                            if isinstance(message['content'], str):
+                                total_tokens += len(encoding.encode(message['content']))
+                            elif isinstance(message['content'], list):
+                                # Handle multi-modal content
+                                for item in message['content']:
+                                    if isinstance(item, dict) and 'text' in item:
+                                        total_tokens += len(encoding.encode(item['text']))
+                        
+                        # Count tokens in name if present
+                        if 'name' in message:
+                            total_tokens += len(encoding.encode(message['name']))
+                        
+                        # Count tokens in function_call if present
+                        if 'function_call' in message:
+                            if isinstance(message['function_call'], dict):
+                                if 'name' in message['function_call']:
+                                    total_tokens += len(encoding.encode(message['function_call']['name']))
+                                if 'arguments' in message['function_call']:
+                                    total_tokens += len(encoding.encode(message['function_call']['arguments']))
+                        
+                        # Count tokens in tool_calls if present
+                        if 'tool_calls' in message and isinstance(message['tool_calls'], list):
+                            for tool_call in message['tool_calls']:
+                                if isinstance(tool_call, dict):
+                                    if 'function' in tool_call and isinstance(tool_call['function'], dict):
+                                        if 'name' in tool_call['function']:
+                                            total_tokens += len(encoding.encode(tool_call['function']['name']))
+                                        if 'arguments' in tool_call['function']:
+                                            total_tokens += len(encoding.encode(tool_call['function']['arguments']))
+                
+                # Add overhead tokens for message formatting (approximate)
+                total_tokens += len(content) * 3  # Overhead per message
+                total_tokens += 3  # Overhead for the conversation
+                
+                return total_tokens
+            
+            else:
+                raise ValueError("Content must be a string or list of message dictionaries")
+                
+        except Exception as e:
+            self.log.error(f"Error counting tokens: {str(e)}")
+            # Fallback: rough estimation (4 chars per token)
+            if isinstance(content, str):
+                return len(content) // 4
+            elif isinstance(content, list):
+                total_chars = sum(len(str(msg)) for msg in content)
+                return total_chars // 4
+            return 0
+
+    def limit_tokens(
+        self, 
+        messages: List[Dict], 
+        max_tokens: int, 
+        model: str = "gpt-4",
+        keep_newest: bool = True,
+        preserve_system: bool = True
+    ) -> List[Dict]:
+        """
+        Limit messages to fit within a token count by filtering older or newer messages.
+        
+        Args:
+            messages (List[Dict]): List of OpenAI message format dictionaries
+            max_tokens (int): Maximum token count to maintain
+            model (str): Model name for tokenizer (default: gpt-4)
+            keep_newest (bool): If True, keep newest messages. If False, keep oldest (default: True)
+            preserve_system (bool): If True, always keep system messages (default: True)
+            
+        Returns:
+            List[Dict]: Filtered list of messages within token limit
+        """
+        try:
+            if not messages:
+                return []
+            
+            # Separate system messages if we need to preserve them
+            system_messages = []
+            other_messages = []
+            
+            if preserve_system:
+                for msg in messages:
+                    if isinstance(msg, dict) and msg.get('role') == 'system':
+                        system_messages.append(msg)
+                    else:
+                        other_messages.append(msg)
+            else:
+                other_messages = messages.copy()
+            
+            # Calculate tokens for system messages
+            system_tokens = self.count_tokens(system_messages, model) if system_messages else 0
+            
+            # Remaining tokens for other messages
+            remaining_tokens = max_tokens - system_tokens
+            
+            if remaining_tokens <= 0:
+                # If system messages exceed limit, just return system messages
+                return system_messages
+            
+            # Filter other messages to fit within remaining tokens
+            if keep_newest:
+                # Start from the end and work backwards
+                filtered_messages = []
+                current_tokens = 0
+                
+                for message in reversed(other_messages):
+                    message_tokens = self.count_tokens([message], model)
+                    if current_tokens + message_tokens <= remaining_tokens:
+                        filtered_messages.insert(0, message)
+                        current_tokens += message_tokens
+                    else:
+                        break
+                
+                # Combine system messages with filtered messages
+                return system_messages + filtered_messages
+            
+            else:
+                # Start from the beginning and work forwards
+                filtered_messages = []
+                current_tokens = 0
+                
+                for message in other_messages:
+                    message_tokens = self.count_tokens([message], model)
+                    if current_tokens + message_tokens <= remaining_tokens:
+                        filtered_messages.append(message)
+                        current_tokens += message_tokens
+                    else:
+                        break
+                
+                # Combine system messages with filtered messages
+                return system_messages + filtered_messages
+                
+        except Exception as e:
+            self.log.error(f"Error limiting tokens: {str(e)}")
+            # Fallback: return original messages (might exceed limit)
+            return messages
