@@ -57,7 +57,7 @@ def scrape_url(url, timeout=15, pause=1, max_length=5000):
         time.sleep(pause)  # friendly crawl rate
 
 def google_search(query, api_key, search_engine_id, num_results=10):
-    """Perform Google Custom Search API search with comprehensive error handling"""
+    """Perform Google Custom Search API search with comprehensive error handling and eventlet compatibility"""
     debug_info = []
     try:
         if not api_key or not search_engine_id:
@@ -69,20 +69,44 @@ def google_search(query, api_key, search_engine_id, num_results=10):
         engine_id_debug = f"Engine ID: {search_engine_id[:8]}...{search_engine_id[-4:]}" if len(search_engine_id) > 12 else f"Engine ID: {search_engine_id}"
         debug_info.append(f"Using credentials - {api_key_debug}, {engine_id_debug}")
         
-        debug_info.append(f"Building Google Custom Search service...")
-        service = build("customsearch", "v1", developerKey=api_key)
-        debug_info.append(f"Service built successfully")
+        # Check if we're running in eventlet environment (Celery)
+        import sys
+        is_eventlet = 'eventlet' in sys.modules
         
-        debug_info.append(f"Executing search for query: '{query}' with {num_results} results")
-        response = (
-            service.cse()
-            .list(q=query, cx=search_engine_id, num=min(num_results, 10))  # Google API max is 10
-            .execute()
-        )
-        debug_info.append(f"API call completed successfully")
+        if is_eventlet:
+            debug_info.append("Detected eventlet environment - using direct REST API")
+            
+            # Use direct REST API call with requests (eventlet-safe)
+            import requests
+            url = "https://www.googleapis.com/customsearch/v1"
+            params = {
+                'key': api_key,
+                'cx': search_engine_id,
+                'q': query,
+                'num': min(num_results, 10)
+            }
+            
+            debug_info.append(f"Making direct REST API call to Google Custom Search")
+            response = requests.get(url, params=params, timeout=20)
+            response.raise_for_status()
+            data = response.json()
+            debug_info.append(f"REST API call completed successfully")
+            
+        else:
+            debug_info.append("Standard environment - using Google API client")
+            service = build("customsearch", "v1", developerKey=api_key)
+            debug_info.append(f"Service built successfully")
+            
+            debug_info.append(f"Executing search for query: '{query}' with {num_results} results")
+            data = (
+                service.cse()
+                .list(q=query, cx=search_engine_id, num=min(num_results, 10))  # Google API max is 10
+                .execute()
+            )
+            debug_info.append(f"API call completed successfully")
         
-        items = response.get("items", [])
-        total_results = response.get("searchInformation", {}).get("totalResults", "0")
+        items = data.get("items", [])
+        total_results = data.get("searchInformation", {}).get("totalResults", "0")
         debug_info.append(f"Google API returned {len(items)} items out of {total_results} total results")
         
         # Debug the full response structure (first time only)

@@ -1153,6 +1153,8 @@ IMPORTANT TOOL USAGE GUIDELINES:
                 
                 # Process search results
                 processed_results = []
+                
+                # Initialize basic result structure first
                 for i, result in enumerate(search_results, 1):
                     title = result.get("title", "")
                     link = result.get("link", "")
@@ -1166,27 +1168,69 @@ IMPORTANT TOOL USAGE GUIDELINES:
                         "scraped_content": None,
                         "scraping_success": False
                     }
+                    processed_results.append(processed_result)
+                
+                # Scrape all URLs in parallel if scraping is enabled
+                if enable_scraping:
+                    if self.verbose:
+                        self.log.debug("Starting parallel scraping of search results...")
                     
-                    # Optionally scrape content from each result
-                    if enable_scraping and link:
-                        if self.verbose:
-                            self.log.debug(f"Scraping result {i}: {title[:50]}...")
+                    def scrape_single_result(result_data):
+                        """Helper function to scrape a single result"""
+                        i, result = result_data
+                        link = result["url"]
+                        if not link:
+                            return i, None, False, "No URL provided"
                         
                         try:
                             scraped_content = scrape_url(link, timeout=scrape_timeout, max_length=max_scrape_length)
                             if scraped_content:
-                                processed_result["scraped_content"] = scraped_content
-                                processed_result["scraping_success"] = True
                                 if self.verbose:
-                                    self.log.debug(f"  ✓ Scraped {len(scraped_content)} characters")
+                                    self.log.debug(f"  ✓ Result {i}: Scraped {len(scraped_content)} characters from {result['title'][:50]}...")
+                                return i, scraped_content, True, None
                             else:
                                 if self.verbose:
-                                    self.log.debug(f"  ✗ Scraping failed (blocked or error)")
+                                    self.log.debug(f"  ✗ Result {i}: Scraping failed (blocked or error) for {result['title'][:50]}...")
+                                return i, None, False, "Scraping failed (blocked or error)"
                         except Exception as e:
                             if self.verbose:
-                                self.log.debug(f"  ✗ Scraping error: {str(e)}")
+                                self.log.debug(f"  ✗ Result {i}: Scraping error for {result['title'][:50]}...: {str(e)}")
+                            return i, None, False, str(e)
                     
-                    processed_results.append(processed_result)
+                    # Use ThreadPoolExecutor for parallel scraping
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
+                    import threading
+                    
+                    # Create list of (index, result) tuples for parallel processing
+                    scraping_tasks = [(result["rank"], result) for result in processed_results]
+                    
+                    # Use max 5 threads to avoid overwhelming servers
+                    max_workers = min(5, len(scraping_tasks))
+                    
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        # Submit all scraping tasks
+                        future_to_rank = {executor.submit(scrape_single_result, task): task[0] for task in scraping_tasks}
+                        
+                        # Collect results as they complete
+                        for future in as_completed(future_to_rank):
+                            rank = future_to_rank[future]
+                            try:
+                                result_rank, scraped_content, success, error = future.result()
+                                # Update the corresponding result in processed_results
+                                for result in processed_results:
+                                    if result["rank"] == result_rank:
+                                        result["scraped_content"] = scraped_content
+                                        result["scraping_success"] = success
+                                        if error and self.verbose:
+                                            self.log.debug(f"  Error for rank {result_rank}: {error}")
+                                        break
+                            except Exception as e:
+                                if self.verbose:
+                                    self.log.debug(f"  Exception in parallel scraping for rank {rank}: {str(e)}")
+                    
+                    if self.verbose:
+                        scraped_count = sum(1 for r in processed_results if r["scraping_success"])
+                        self.log.debug(f"Parallel scraping completed: {scraped_count}/{len(processed_results)} URLs scraped successfully")
                 
                 final_result = {
                     "type": "web_search",
@@ -1199,10 +1243,6 @@ IMPORTANT TOOL USAGE GUIDELINES:
                 
                 if return_debug_info:
                     final_result["debug_info"] = debug_info
-                
-                if self.verbose:
-                    scraped_count = sum(1 for r in processed_results if r["scraping_success"])
-                    self.log.debug(f"✓ Search completed: {len(processed_results)} results, {scraped_count} scraped")
                 
                 return final_result
                 
