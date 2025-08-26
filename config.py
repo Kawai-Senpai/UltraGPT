@@ -2,14 +2,11 @@
 # This file contains all configurable parameters for UltraGPT
 
 # Default Models
-DEFAULT_MODEL = "gpt-4.1"
-DEFAULT_STEPS_MODEL = "gpt-4.1-nano"
-DEFAULT_REASONING_MODEL = "gpt-4.1-nano"
-DEFAULT_PARSE_MODEL = "gpt-4.1"
-DEFAULT_TOOLS_MODEL = "gpt-4.1"
-
-# Token Configuration
-MAX_TOKENS_DEFAULT = 4096
+DEFAULT_MODEL = "gpt-5"
+DEFAULT_STEPS_MODEL = "gpt-5-nano"
+DEFAULT_REASONING_MODEL = "gpt-5-nano"
+DEFAULT_PARSE_MODEL = "gpt-5"
+DEFAULT_TOOLS_MODEL = "gpt-5"
 
 # History Configuration
 MAX_CONTEXT_MESSAGES = 10
@@ -25,7 +22,7 @@ TOOL_SELECTION_TEMPERATURE = 0.1
 TOOLS_CONFIG = {
     "web-search": {
         "max_results": 5,
-        "model": "gpt-4.1-nano",
+        "model": "gpt-5-nano",
         "enable_scraping": True,
         "max_scrape_length": 5000,
         "scrape_timeout": 15,
@@ -33,11 +30,11 @@ TOOLS_CONFIG = {
         "max_history_items": 5
     },
     "calculator": {
-        "model": "gpt-4.1-nano",
+        "model": "gpt-5-nano",
         "max_history_items": 5
     },
     "math-operations": {
-        "model": "gpt-4.1-nano",
+        "model": "gpt-5-nano",
         "max_history_items": 5
     }
 }

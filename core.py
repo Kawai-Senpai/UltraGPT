@@ -83,8 +83,8 @@ class UltraGPT:
         self.google_api_key = google_api_key
         self.search_engine_id = search_engine_id
         
-        # Store max_tokens setting
-        self.max_tokens = max_tokens if max_tokens is not None else config.MAX_TOKENS_DEFAULT
+        # Store max_tokens setting - None means use provider-specific model limits
+        self.max_tokens = max_tokens
         
         self.verbose = verbose
         self.log = logger(
@@ -696,13 +696,15 @@ IMPORTANT TOOL USAGE GUIDELINES:
             if reasoning_pipeline:
                 futures.append({
                     "type": "reasoning",
-                    "future": executor.submit(self.run_reasoning_pipeline, messages, model, temperature, reasoning_iterations, tools, tools_config, reasoning_model, max_tokens, deepthink)
+                    # Deepthink MUST be disabled inside pipelines to avoid loops
+                    "future": executor.submit(self.run_reasoning_pipeline, messages, model, temperature, reasoning_iterations, tools, tools_config, reasoning_model, max_tokens, False)
                 })
             
             if steps_pipeline:
                 futures.append({
                     "type": "steps",
-                    "future": executor.submit(self.run_steps_pipeline, messages, model, temperature, tools, tools_config, steps_model, max_tokens, deepthink)
+                    # Deepthink MUST be disabled inside pipelines to avoid loops
+                    "future": executor.submit(self.run_steps_pipeline, messages, model, temperature, tools, tools_config, steps_model, max_tokens, False)
                 })
 
             for future in futures:
@@ -752,10 +754,20 @@ IMPORTANT TOOL USAGE GUIDELINES:
                             if msg.get("role") in ["system", "developer"]:
                                 self.log.debug(f"Final system message preview: {msg['content'][:300]}...")
 
+        # Use reasoning_pipeline flag to control deepthink for the final AI call
+        final_deepthink = bool(reasoning_pipeline)
         if schema:
-            final_output, tokens, final_details = self.chat_with_model_parse(messages, schema=schema, model=model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens, deepthink=deepthink)
+            final_output, tokens, final_details = self.chat_with_model_parse(
+                messages, schema=schema, model=model, temperature=temperature,
+                tools=tools, tools_config=tools_config, max_tokens=max_tokens,
+                deepthink=final_deepthink
+            )
         else:
-            final_output, tokens, final_details = self.chat_with_ai_sync(messages, model=model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens, deepthink=deepthink)
+            final_output, tokens, final_details = self.chat_with_ai_sync(
+                messages, model=model, temperature=temperature,
+                tools=tools, tools_config=tools_config, max_tokens=max_tokens,
+                deepthink=final_deepthink
+            )
 
         if steps:
             steps.append(conclusion)
@@ -895,7 +907,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
                 future = executor.submit(
                     self.run_reasoning_pipeline,
                     tool_call_messages, model, temperature, reasoning_iterations,
-                    tools, tools_config, reasoning_model, max_tokens, deepthink
+                    tools, tools_config, reasoning_model, max_tokens, False
                 )
                 futures.append(("reasoning", future))
             
@@ -903,7 +915,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
                 future = executor.submit(
                     self.run_steps_pipeline,
                     tool_call_messages, model, temperature,
-                    tools, tools_config, steps_model, max_tokens, deepthink
+                    tools, tools_config, steps_model, max_tokens, False
                 )
                 futures.append(("steps", future))
             
@@ -936,6 +948,8 @@ IMPORTANT TOOL USAGE GUIDELINES:
         # AI will always choose at least one tool - parallel_tool_calls controls how many
         parallel_calls = allow_multiple  # Simple: allow_multiple directly controls parallel calls
         
+        # Use reasoning_pipeline to control deepthink for the final native tool call
+        final_deepthink = bool(reasoning_pipeline)
         tool_call_response, tokens, final_details = self.chat_with_model_tools(
             enhanced_messages, 
             user_tools=validated_tools,
@@ -945,7 +959,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
             tools_config=tools_config,
             max_tokens=max_tokens,
             parallel_tool_calls=parallel_calls,
-            deepthink=deepthink
+            deepthink=final_deepthink
         )
 
         total_tokens = reasoning_tokens + steps_tokens + tokens

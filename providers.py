@@ -1,6 +1,7 @@
 """
 Provider abstraction layer for different AI providers (OpenAI, Claude, etc.)
 """
+import json
 from openai import OpenAI
 try:
     from anthropic import Anthropic
@@ -8,7 +9,6 @@ except ImportError:
     Anthropic = None
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Union
-import json
 
 
 class BaseProvider:
@@ -17,7 +17,7 @@ class BaseProvider:
     def __init__(self, api_key: str, **kwargs):
         self.api_key = api_key
         
-    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
+    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
         """
         Standard chat completion
         Returns: (content: str, tokens: int)
@@ -26,7 +26,7 @@ class BaseProvider:
         """
         raise NotImplementedError
         
-    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
+    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
         """
         Chat completion with structured output
         Returns: (parsed_content: dict, tokens: int)
@@ -35,7 +35,7 @@ class BaseProvider:
         """
         raise NotImplementedError
         
-    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
+    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
         """
         Chat completion with native tool calling
         Returns: (response_message: dict, tokens: int)
@@ -62,10 +62,41 @@ class OpenAIProvider(BaseProvider):
     # Model name prefixes that don't support temperature parameter
     NO_TEMPERATURE_MODELS = ["o1", "o2", "o3", "o4", "gpt-5"]
     NO_MAX_TOKENS_MODELS = ["o1", "o2", "o3", "o4", "gpt-5"]
-    
+    LIMITS = {
+        "gpt-5": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "gpt-5-mini": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "gpt-5-nano": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "gpt-5-chat-latest": {"max_input_tokens": 128000, "max_output_tokens": 16384},
+
+        "gpt-4.1": {"max_input_tokens": 1000000, "max_output_tokens": 32768},
+        "gpt-4.1-mini": {"max_input_tokens": 1000000, "max_output_tokens": 32768},
+        "gpt-4.1-nano": {"max_input_tokens": 1000000, "max_output_tokens": 32768},
+
+        "gpt-4o": {"max_input_tokens": 128000, "max_output_tokens": 16384},
+        "gpt-4o-mini": {"max_input_tokens": 128000, "max_output_tokens": 16384},
+        "gpt-4o-realtime-preview": {"max_input_tokens": 128000, "max_output_tokens": 4096},
+        "gpt-4o-mini-realtime-preview": {"max_input_tokens": 128000, "max_output_tokens": 4096},
+        "gpt-4o-audio-preview": {"max_input_tokens": 128000, "max_output_tokens": 16384},
+        "gpt-4o-mini-transcribe": {"max_input_tokens": 16000, "max_output_tokens": 2000},
+
+        "o3": {"max_input_tokens": 200000, "max_output_tokens": 100000},
+        "o3-pro": {"max_input_tokens": 200000, "max_output_tokens": 100000},
+        "o3-deep-research": {"max_input_tokens": 200000, "max_output_tokens": 100000},
+        "o1": {"max_input_tokens": 200000, "max_output_tokens": 100000},
+
+        "gpt-4-turbo": {"max_input_tokens": 128000, "max_output_tokens": 4096},
+        "gpt-3.5-turbo": {"max_input_tokens": 16385, "max_output_tokens": 4096},
+        
+        # Default fallback for unknown OpenAI models
+        "default": {"max_input_tokens": 128000, "max_output_tokens": 4096}
+    }
+
     def __init__(self, api_key: str, **kwargs):
         super().__init__(api_key, **kwargs)
         self.client = OpenAI(api_key=api_key)
+        
+        # Pre-sort model keys by length (longest first) for efficient substring matching
+        self._sorted_model_keys = sorted([k for k in self.LIMITS.keys() if k != "default"], key=len, reverse=True)
         
     def _should_include_temperature(self, model: str) -> bool:
         """Check if model supports temperature parameter"""
@@ -74,8 +105,21 @@ class OpenAIProvider(BaseProvider):
     def _should_include_max_tokens(self, model: str) -> bool:
         """Check if model supports max_tokens parameter"""
         return not any(prefix in model for prefix in self.NO_MAX_TOKENS_MODELS)
+    
+    def _get_model_max_output_tokens(self, model: str) -> Optional[int]:
+        """Get model-specific max output tokens from LIMITS, returns None if not found"""
+        # Use pre-sorted keys for efficient longest-first matching
+        for model_key in self._sorted_model_keys:
+            if model_key in model:
+                return self.LIMITS[model_key].get("max_output_tokens")
         
-    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
+        # Use default if no specific model match found
+        if "default" in self.LIMITS:
+            return self.LIMITS["default"].get("max_output_tokens")
+        
+        return None
+        
+    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
         """Standard OpenAI chat completion"""
         kwargs = {
             "model": model,
@@ -87,16 +131,21 @@ class OpenAIProvider(BaseProvider):
         if self._should_include_temperature(model):
             kwargs["temperature"] = temperature
         
-        # Only add max_tokens if it's not None
+        # Only add max_tokens if it's not None and model supports it
         if max_tokens is not None and self._should_include_max_tokens(model):
             kwargs["max_tokens"] = max_tokens
+        elif max_tokens is None and self._should_include_max_tokens(model):
+            # Use model-specific output limit if max_tokens is None
+            model_limit = self._get_model_max_output_tokens(model)
+            if model_limit is not None:
+                kwargs["max_tokens"] = model_limit
             
         response = self.client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content.strip()
         tokens = response.usage.total_tokens
         return content, tokens
         
-    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
+    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
         """OpenAI structured output with schema"""
         kwargs = {
             "model": model,
@@ -108,9 +157,14 @@ class OpenAIProvider(BaseProvider):
         if self._should_include_temperature(model):
             kwargs["temperature"] = temperature
         
-        # Only add max_tokens if it's not None
+        # Only add max_tokens if it's not None and model supports it
         if max_tokens is not None and self._should_include_max_tokens(model):
             kwargs["max_tokens"] = max_tokens
+        elif max_tokens is None and self._should_include_max_tokens(model):
+            # Use model-specific output limit if max_tokens is None
+            model_limit = self._get_model_max_output_tokens(model)
+            if model_limit is not None:
+                kwargs["max_tokens"] = model_limit
             
         response = self.client.beta.chat.completions.parse(**kwargs)
         content = response.choices[0].message.parsed
@@ -119,7 +173,7 @@ class OpenAIProvider(BaseProvider):
         tokens = response.usage.total_tokens
         return content, tokens
         
-    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
+    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
         """OpenAI native tool calling - always requires at least one tool to be called"""
         kwargs = {
             "model": model,
@@ -132,9 +186,14 @@ class OpenAIProvider(BaseProvider):
         if self._should_include_temperature(model):
             kwargs["temperature"] = temperature
         
-        # Only add max_tokens if it's not None
+        # Only add max_tokens if it's not None and model supports it
         if max_tokens is not None and self._should_include_max_tokens(model):
             kwargs["max_tokens"] = max_tokens
+        elif max_tokens is None and self._should_include_max_tokens(model):
+            # Use model-specific output limit if max_tokens is None
+            model_limit = self._get_model_max_output_tokens(model)
+            if model_limit is not None:
+                kwargs["max_tokens"] = model_limit
             
         # Add parallel_tool_calls if specified (OpenAI specific)
         if parallel_tool_calls is not None:
@@ -172,12 +231,26 @@ class ClaudeProvider(BaseProvider):
     # Model name prefixes that don't support temperature parameter
     NO_TEMPERATURE_MODELS = []
     NO_MAX_TOKENS_MODELS = []
+    LIMITS = {
+        "claude-opus-4-1": {"max_input_tokens": 200000, "max_output_tokens": 32000},
+        "claude-opus-4": {"max_input_tokens": 200000, "max_output_tokens": 32000},
+        "claude-sonnet-4": {"max_input_tokens": 200000, "max_output_tokens": 64000},
+        "claude-3-7-sonnet": {"max_input_tokens": 200000, "max_output_tokens": 64000},
+        "claude-3-5-haiku": {"max_input_tokens": 200000, "max_output_tokens": 8192},
+        "claude-3-haiku": {"max_input_tokens": 200000, "max_output_tokens": 4096},
+        
+        # Default fallback for unknown Claude models
+        "default": {"max_input_tokens": 200000, "max_output_tokens": 8192}
+    } #! Always check if these substrings are in the model name, as full model names can have suffixes like -2024-10-18 etc.
 
     def __init__(self, api_key: str, **kwargs):
         super().__init__(api_key, **kwargs)
         if Anthropic is None:
             raise ImportError("anthropic package is required for Claude support. Install with: pip install anthropic")
         self.client = Anthropic(api_key=api_key)
+        
+        # Pre-sort model keys by length (longest first) for efficient substring matching
+        self._sorted_model_keys = sorted([k for k in self.LIMITS.keys() if k != "default"], key=len, reverse=True)
 
     def _should_include_temperature(self, model: str) -> bool:
         """Check if model supports temperature parameter"""
@@ -186,6 +259,19 @@ class ClaudeProvider(BaseProvider):
     def _should_include_max_tokens(self, model: str) -> bool:
         """Check if model supports max_tokens parameter"""
         return not any(prefix in model for prefix in self.NO_MAX_TOKENS_MODELS)
+    
+    def _get_model_max_output_tokens(self, model: str) -> Optional[int]:
+        """Get model-specific max output tokens from LIMITS, returns None if not found"""
+        # Use pre-sorted keys for efficient longest-first matching
+        for model_key in self._sorted_model_keys:
+            if model_key in model:
+                return self.LIMITS[model_key].get("max_output_tokens")
+        
+        # Use default if no specific model match found
+        if "default" in self.LIMITS:
+            return self.LIMITS["default"].get("max_output_tokens")
+        
+        return None
         
     def convert_messages(self, messages: List[Dict]) -> tuple:
         """
@@ -255,7 +341,7 @@ class ClaudeProvider(BaseProvider):
         system_prompt = "\n\n".join(system_parts) if system_parts else None
         return converted_messages, system_prompt
         
-    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
+    def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
         """Claude chat completion"""
         converted_messages, system_prompt = self.convert_messages(messages)
         
@@ -268,9 +354,14 @@ class ClaudeProvider(BaseProvider):
         if self._should_include_temperature(model):
             kwargs["temperature"] = temperature 
         
-        # Only add max_tokens if it's not None
+        # Only add max_tokens if it's not None and model supports it
         if max_tokens is not None and self._should_include_max_tokens(model):
             kwargs["max_tokens"] = max_tokens
+        elif max_tokens is None and self._should_include_max_tokens(model):
+            # Use model-specific output limit if max_tokens is None
+            model_limit = self._get_model_max_output_tokens(model)
+            if model_limit is not None:
+                kwargs["max_tokens"] = model_limit
         
         if system_prompt:
             kwargs["system"] = system_prompt
@@ -280,7 +371,7 @@ class ClaudeProvider(BaseProvider):
         tokens = response.usage.input_tokens + response.usage.output_tokens
         return content, tokens
         
-    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
+    def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
         """
         Claude structured output with schema using tool-based approach
         
@@ -318,9 +409,14 @@ class ClaudeProvider(BaseProvider):
         if self._should_include_temperature(model):
             kwargs["temperature"] = temperature
 
-        # Only add max_tokens if it's not None
+        # Only add max_tokens if it's not None and model supports it
         if max_tokens is not None and self._should_include_max_tokens(model):
             kwargs["max_tokens"] = max_tokens
+        elif max_tokens is None and self._should_include_max_tokens(model):
+            # Use model-specific output limit if max_tokens is None
+            model_limit = self._get_model_max_output_tokens(model)
+            if model_limit is not None:
+                kwargs["max_tokens"] = model_limit
         
         if system_prompt:
             kwargs["system"] = system_prompt
@@ -351,7 +447,7 @@ class ClaudeProvider(BaseProvider):
         tokens = response.usage.input_tokens + response.usage.output_tokens
         return content, tokens
         
-    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
+    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
         """Claude native tool calling - always requires at least one tool to be called"""
         converted_messages, system_prompt = self.convert_messages(messages)
         
@@ -382,9 +478,14 @@ class ClaudeProvider(BaseProvider):
         if self._should_include_temperature(model):
             kwargs["temperature"] = temperature
         
-        # Only add max_tokens if it's not None
+        # Only add max_tokens if it's not None and model supports it
         if max_tokens is not None and self._should_include_max_tokens(model):
             kwargs["max_tokens"] = max_tokens
+        elif max_tokens is None and self._should_include_max_tokens(model):
+            # Use model-specific output limit if max_tokens is None
+            model_limit = self._get_model_max_output_tokens(model)
+            if model_limit is not None:
+                kwargs["max_tokens"] = model_limit
         
         # Handle parallel tool calls (Claude uses disable_parallel_tool_use)
         if parallel_tool_calls is not None:
@@ -460,19 +561,19 @@ class ProviderManager:
             # Default to openai if no provider specified
             return "openai", model
             
-    def chat_completion(self, model: str, messages: List[Dict], temperature: float = 0.7, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
+    def chat_completion(self, model: str, messages: List[Dict], temperature: float = 0.7, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
         """Route chat completion to appropriate provider"""
         provider_name, model_name = self.parse_model_string(model)
         provider = self.get_provider(provider_name)
         return provider.chat_completion(messages, model_name, temperature, max_tokens, deepthink)
         
-    def chat_completion_with_schema(self, model: str, messages: List[Dict], schema: BaseModel, temperature: float = 0.7, max_tokens: Optional[int] = 4096, deepthink: Optional[bool] = None) -> tuple:
+    def chat_completion_with_schema(self, model: str, messages: List[Dict], schema: BaseModel, temperature: float = 0.7, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
         """Route structured chat completion to appropriate provider"""
         provider_name, model_name = self.parse_model_string(model)
         provider = self.get_provider(provider_name)
         return provider.chat_completion_with_schema(messages, schema, model_name, temperature, max_tokens, deepthink)
         
-    def chat_completion_with_tools(self, model: str, messages: List[Dict], tools: List[Dict], temperature: float = 0.7, max_tokens: Optional[int] = 4096, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
+    def chat_completion_with_tools(self, model: str, messages: List[Dict], tools: List[Dict], temperature: float = 0.7, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
         """Route tool calling to appropriate provider - always requires at least one tool to be called"""
         provider_name, model_name = self.parse_model_string(model)
         provider = self.get_provider(provider_name)
