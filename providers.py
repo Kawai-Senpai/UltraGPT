@@ -48,6 +48,19 @@ class BaseProvider:
         """
         raise NotImplementedError
         
+    def get_model_input_tokens(self, model: str) -> Optional[int]:
+        """
+        Get model-specific max input tokens from provider limits.
+        Default implementation returns None. Providers should override this.
+        
+        Args:
+            model (str): Model name to get input limits for
+            
+        Returns:
+            Optional[int]: Maximum input tokens for the model, or None if not found
+        """
+        return None
+        
     def convert_messages(self, messages: List[Dict]) -> tuple:
         """
         Convert OpenAI format messages to provider-specific format
@@ -116,6 +129,19 @@ class OpenAIProvider(BaseProvider):
         # Use default if no specific model match found
         if "default" in self.LIMITS:
             return self.LIMITS["default"].get("max_output_tokens")
+        
+        return None
+        
+    def get_model_input_tokens(self, model: str) -> Optional[int]:
+        """Get model-specific max input tokens from LIMITS using pre-sorted keys"""
+        # Use pre-sorted keys for efficient longest-first matching
+        for model_key in self._sorted_model_keys:
+            if model_key in model:
+                return self.LIMITS[model_key].get("max_input_tokens")
+        
+        # Use default if no specific model match found
+        if "default" in self.LIMITS:
+            return self.LIMITS["default"].get("max_input_tokens")
         
         return None
         
@@ -270,6 +296,19 @@ class ClaudeProvider(BaseProvider):
         # Use default if no specific model match found
         if "default" in self.LIMITS:
             return self.LIMITS["default"].get("max_output_tokens")
+        
+        return None
+        
+    def get_model_input_tokens(self, model: str) -> Optional[int]:
+        """Get model-specific max input tokens from LIMITS using pre-sorted keys"""
+        # Use pre-sorted keys for efficient longest-first matching
+        for model_key in self._sorted_model_keys:
+            if model_key in model:
+                return self.LIMITS[model_key].get("max_input_tokens")
+        
+        # Use default if no specific model match found
+        if "default" in self.LIMITS:
+            return self.LIMITS["default"].get("max_input_tokens")
         
         return None
         

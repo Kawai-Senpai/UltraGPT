@@ -26,6 +26,7 @@ class UltraGPT:
         google_api_key: str = None,
         search_engine_id: str = None,
         max_tokens: Optional[int] = None,
+        input_truncation: Union[str, int] = None,
         verbose: bool = False,
         logger_name: str = 'ultragpt',
         logger_filename: str = 'debug/ultragpt.log',
@@ -43,6 +44,7 @@ class UltraGPT:
             google_api_key (str, optional): Google Custom Search API key for web search tool.
             search_engine_id (str, optional): Google Custom Search Engine ID for web search tool.
             max_tokens (int, optional): Maximum number of tokens to generate. Set to None to use provider defaults. Defaults to 4096.
+            input_truncation (Union[str, int], optional): Input truncation mode. Can be "AUTO" (use model input limits), "OFF" (no truncation), or an integer token count. Defaults to "AUTO".
             verbose (bool, optional): Whether to enable verbose logging. Defaults to False.
             logger_name (str, optional): The name of the logger. Defaults to 'ultragpt'.
             logger_filename (str, optional): The filename for the logger. Defaults to 'debug/ultragpt.log'.
@@ -86,6 +88,9 @@ class UltraGPT:
         # Store max_tokens setting - None means use provider-specific model limits
         self.max_tokens = max_tokens
         
+        # Store input_truncation setting - use config default if not provided
+        self.input_truncation = input_truncation if input_truncation is not None else config.DEFAULT_INPUT_TRUNCATION
+        
         self.verbose = verbose
         self.log = logger(
             name=logger_name,
@@ -124,6 +129,7 @@ class UltraGPT:
         tools: list,
         tools_config: dict,
         max_tokens: Optional[int] = None,
+        input_truncation: Optional[Union[str, int]] = None,
         deepthink: Optional[bool] = None
     ):
         """
@@ -134,6 +140,8 @@ class UltraGPT:
             temperature (float): The temperature for the model's output.
             tools (list): The list of tools to enable.
             tools_config (dict): The configuration for the tools.
+            max_tokens (Optional[int]): Maximum tokens to generate. Overrides instance default if provided.
+            input_truncation (Optional[Union[str, int]]): Override input truncation setting. Can be "AUTO", "OFF", or a token count.
             deepthink (Optional[bool]): Enable deep thinking mode for supported models.
         Returns:
             tuple: A tuple containing the response content, total tokens, and details dict.
@@ -144,6 +152,9 @@ class UltraGPT:
             Verbose: Optionally logs detailed steps of the request and response process.
         """
         try:
+            # Apply input truncation before processing
+            messages = self.apply_input_truncation(messages, model, input_truncation)
+            
             self.log.debug("Sending request to AI provider (msgs: " + str(len(messages)) + ")")
             if self.verbose:
                 provider_name, model_name = self.provider_manager.parse_model_string(model)
@@ -190,6 +201,7 @@ class UltraGPT:
         tools: list = [],
         tools_config: dict = {},
         max_tokens: Optional[int] = None,
+        input_truncation: Optional[Union[str, int]] = None,
         deepthink: Optional[bool] = None
     ):
         """
@@ -201,6 +213,9 @@ class UltraGPT:
             temperature (float): The temperature for the model's output.
             tools (list): The list of tools to enable.
             tools_config (dict): The configuration for the tools.
+            max_tokens (Optional[int]): Maximum tokens to generate. Overrides instance default if provided.
+            input_truncation (Optional[Union[str, int]]): Override input truncation setting. Can be "AUTO", "OFF", or a token count.
+            deepthink (Optional[bool]): Enable deep thinking mode for supported models.
         Returns:
             tuple: A tuple containing the parsed content, total tokens, and details dict.
         Raises:
@@ -210,6 +225,9 @@ class UltraGPT:
         model = model or config.DEFAULT_PARSE_MODEL
         temperature = temperature if temperature is not None else config.DEFAULT_TEMPERATURE
         try:
+            # Apply input truncation before processing
+            messages = self.apply_input_truncation(messages, model, input_truncation)
+            
             self.log.debug("Sending parse request with schema: %s", schema)
             
             tool_response, tool_usage_details = self.execute_tools(history=messages, tools=tools, tools_config=tools_config)
@@ -245,14 +263,30 @@ class UltraGPT:
         tools: list = [],
         tools_config: dict = {},
         max_tokens: Optional[int] = None,
+        input_truncation: Optional[Union[str, int]] = None,
         parallel_tool_calls: Optional[bool] = None,
         deepthink: Optional[bool] = None
     ):
         """
         Sends a chat message to the model with native tool calling support.
         AI will always be required to choose at least one tool from the provided tools.
+        
+        Args:
+            messages (list): A list of message dictionaries to be sent to the model.
+            user_tools (list): List of user-defined tools with schemas and prompts.
+            model (str): The model to use (format: "provider:model" or just "model" for OpenAI).
+            temperature (float): The temperature for the model's output.
+            tools (list): The list of internal tools to enable.
+            tools_config (dict): The configuration for internal tools.
+            max_tokens (Optional[int]): Maximum tokens to generate. Overrides instance default if provided.
+            input_truncation (Optional[Union[str, int]]): Override input truncation setting. Can be "AUTO", "OFF", or a token count.
+            parallel_tool_calls (Optional[bool]): Whether to allow parallel tool calls.
+            deepthink (Optional[bool]): Enable deep thinking mode for supported models.
         """
         try:
+            # Apply input truncation before processing
+            messages = self.apply_input_truncation(messages, model, input_truncation)
+            
             self.log.debug("Sending native tool calling request")
             
             # Execute UltraGPT tools if any
@@ -491,6 +525,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
         tools_config: dict,
         steps_model: str = None,
         max_tokens: Optional[int] = None,
+        input_truncation: Optional[Union[str, int]] = None,
         deepthink: Optional[bool] = None
     ):
         # Use steps_model if provided, otherwise use main model
@@ -508,7 +543,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
         messages = self.turnoff_system_message(messages)
         steps_generator_message = messages + [{"role": "system", "content": generate_steps_prompt()}]
 
-        steps_json, tokens, steps_details = self.chat_with_model_parse(steps_generator_message, schema=Steps, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens, deepthink=deepthink)
+        steps_json, tokens, steps_details = self.chat_with_model_parse(steps_generator_message, schema=Steps, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens, input_truncation=input_truncation, deepthink=deepthink)
         total_tokens += tokens
         all_tools_used.extend(steps_details.get("tools_used", []))
         
@@ -528,7 +563,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
             self.log.debug("Processing step " + str(idx) + "/" + str(len(steps)))
             step_prompt = each_step_prompt(memory, step)
             step_message = messages + [{"role": "system", "content": step_prompt}]
-            step_response, tokens, step_details = self.chat_with_ai_sync(step_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens, deepthink=deepthink)
+            step_response, tokens, step_details = self.chat_with_ai_sync(step_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens, input_truncation=input_truncation, deepthink=deepthink)
             self.log.debug("Step " + str(idx) + " response: " + step_response[:100] + "...")
             total_tokens += tokens
             all_tools_used.extend(step_details.get("tools_used", []))
@@ -542,7 +577,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
         # Generate final conclusion
         conclusion_prompt = generate_conclusion_prompt(memory)
         conclusion_message = messages + [{"role": "system", "content": conclusion_prompt}]
-        conclusion, tokens, conclusion_details = self.chat_with_ai_sync(conclusion_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens, deepthink=deepthink)
+        conclusion, tokens, conclusion_details = self.chat_with_ai_sync(conclusion_message, model=active_model, temperature=temperature, tools=tools, tools_config=tools_config, max_tokens=max_tokens, input_truncation=input_truncation, deepthink=deepthink)
         total_tokens += tokens
         all_tools_used.extend(conclusion_details.get("tools_used", []))
 
@@ -564,6 +599,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
         tools_config: dict,
         reasoning_model: str = None,
         max_tokens: Optional[int] = None,
+        input_truncation: Optional[Union[str, int]] = None,
         deepthink: Optional[bool] = None
     ):
         # Use reasoning_model if provided, otherwise use main model
@@ -597,6 +633,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
                 tools=tools,
                 tools_config=tools_config,
                 max_tokens=max_tokens,
+                input_truncation=input_truncation,
                 deepthink=deepthink
             )
             total_tokens += tokens
@@ -622,6 +659,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
         model: str = None,
         temperature: float = None,
         max_tokens: Optional[int] = None,  # Override instance default if provided
+        input_truncation: Optional[Union[str, int]] = None,  # Override instance input_truncation setting
         reasoning_iterations: int = None,
         steps_pipeline: bool = False,
         reasoning_pipeline: bool = False,
@@ -641,6 +679,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
             model (str, optional): The model to use. Format: "provider:model" (e.g., "claude:claude-3-sonnet-20240229") or just "model" (defaults to OpenAI). Defaults to "gpt-4o".
             temperature (float, optional): The temperature for the model's output. Defaults to 0.7.
             max_tokens (int, optional): Maximum tokens to generate. Overrides instance default if provided. None uses provider defaults.
+            input_truncation (Union[str, int], optional): Override input truncation setting. Can be "AUTO" (use model limits), "OFF" (no truncation), or an integer token count. Defaults to instance setting.
             reasoning_iterations (int, optional): The number of reasoning iterations. Defaults to 3.
             steps_pipeline (bool, optional): Whether to use steps pipeline. Defaults to True.
             reasoning_pipeline (bool, optional): Whether to use reasoning pipeline. Defaults to True.
@@ -696,14 +735,14 @@ IMPORTANT TOOL USAGE GUIDELINES:
                 futures.append({
                     "type": "reasoning",
                     # Deepthink MUST be disabled inside pipelines to avoid loops
-                    "future": executor.submit(self.run_reasoning_pipeline, messages, model, temperature, reasoning_iterations, tools, tools_config, reasoning_model, max_tokens, False)
+                    "future": executor.submit(self.run_reasoning_pipeline, messages, model, temperature, reasoning_iterations, tools, tools_config, reasoning_model, max_tokens, input_truncation, False)
                 })
             
             if steps_pipeline:
                 futures.append({
                     "type": "steps",
                     # Deepthink MUST be disabled inside pipelines to avoid loops
-                    "future": executor.submit(self.run_steps_pipeline, messages, model, temperature, tools, tools_config, steps_model, max_tokens, False)
+                    "future": executor.submit(self.run_steps_pipeline, messages, model, temperature, tools, tools_config, steps_model, max_tokens, input_truncation, False)
                 })
 
             for future in futures:
@@ -759,13 +798,13 @@ IMPORTANT TOOL USAGE GUIDELINES:
             final_output, tokens, final_details = self.chat_with_model_parse(
                 messages, schema=schema, model=model, temperature=temperature,
                 tools=tools, tools_config=tools_config, max_tokens=max_tokens,
-                deepthink=final_deepthink
+                input_truncation=input_truncation, deepthink=final_deepthink
             )
         else:
             final_output, tokens, final_details = self.chat_with_ai_sync(
                 messages, model=model, temperature=temperature,
                 tools=tools, tools_config=tools_config, max_tokens=max_tokens,
-                deepthink=final_deepthink
+                input_truncation=input_truncation, deepthink=final_deepthink
             )
 
         if steps:
@@ -818,6 +857,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
         allow_multiple: bool = True,
         model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)
         temperature: float = None,
+        input_truncation: Optional[Union[str, int]] = None,  # Override instance input_truncation setting
         reasoning_iterations: int = None,
         steps_pipeline: bool = False,
         reasoning_pipeline: bool = False,
@@ -837,6 +877,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
             allow_multiple (bool, optional): Whether to allow multiple tool calls. Defaults to True.
             model (str, optional): The model to use. Format: "provider:model" or just "model" (defaults to OpenAI). Defaults to "gpt-4o".
             temperature (float, optional): The temperature for the model's output. Defaults to 0.7.
+            input_truncation (Union[str, int], optional): Override input truncation setting. Can be "AUTO", "OFF", or a token count. Defaults to instance setting.
             reasoning_iterations (int, optional): The number of reasoning iterations. Defaults to 3.
             steps_pipeline (bool, optional): Whether to use steps pipeline. Defaults to True.
             reasoning_pipeline (bool, optional): Whether to use reasoning pipeline. Defaults to True.
@@ -905,7 +946,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
                 future = executor.submit(
                     self.run_reasoning_pipeline,
                     tool_call_messages, model, temperature, reasoning_iterations,
-                    tools, tools_config, reasoning_model, max_tokens, False
+                    tools, tools_config, reasoning_model, max_tokens, input_truncation, False
                 )
                 futures.append(("reasoning", future))
             
@@ -913,7 +954,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
                 future = executor.submit(
                     self.run_steps_pipeline,
                     tool_call_messages, model, temperature,
-                    tools, tools_config, steps_model, max_tokens, False
+                    tools, tools_config, steps_model, max_tokens, input_truncation, False
                 )
                 futures.append(("steps", future))
             
@@ -956,6 +997,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
             tools=tools,
             tools_config=tools_config,
             max_tokens=max_tokens,
+            input_truncation=input_truncation,
             parallel_tool_calls=parallel_calls,
             deepthink=final_deepthink
         )
@@ -1372,78 +1414,187 @@ IMPORTANT TOOL USAGE GUIDELINES:
     ) -> List[Dict]:
         """
         Limit messages to fit within a token count by filtering older or newer messages.
+        Preserves original message order and handles all OpenAI message formats including
+        tool calls, tool results, function calls, and multi-modal content.
         
         Args:
             messages (List[Dict]): List of OpenAI message format dictionaries
             max_tokens (int): Maximum token count to maintain
             model (str): Model name for tokenizer (default: gpt-4)
             keep_newest (bool): If True, keep newest messages. If False, keep oldest (default: True)
-            preserve_system (bool): If True, always keep system messages (default: True)
+            preserve_system (bool): If True, always keep system/developer messages (default: True)
             
         Returns:
-            List[Dict]: Filtered list of messages within token limit
+            List[Dict]: Filtered list of messages within token limit, preserving original order
         """
         try:
             if not messages:
                 return []
             
-            # Separate system messages if we need to preserve them
-            system_messages = []
-            other_messages = []
-            
             if preserve_system:
-                for msg in messages:
-                    if isinstance(msg, dict) and msg.get('role') == 'system':
-                        system_messages.append(msg)
+                # Mark which messages are system/developer messages and their original positions
+                system_indices = set()
+                system_messages = []
+                non_system_messages = []
+                
+                for i, msg in enumerate(messages):
+                    if isinstance(msg, dict) and msg.get('role') in ['system', 'developer']:
+                        system_indices.add(i)
+                        system_messages.append((i, msg))
                     else:
-                        other_messages.append(msg)
+                        non_system_messages.append((i, msg))
+                
+                # Calculate tokens for system messages
+                system_tokens = self.count_tokens([msg for _, msg in system_messages], model) if system_messages else 0
+                
+                # Remaining tokens for non-system messages
+                remaining_tokens = max_tokens - system_tokens
+                
+                if remaining_tokens <= 0:
+                    # If system messages exceed limit, return only system messages in original order
+                    return [msg for _, msg in system_messages]
+                
+                # Filter non-system messages based on keep_newest preference
+                if keep_newest:
+                    # Start from the newest non-system messages and work backwards
+                    selected_non_system = []
+                    current_tokens = 0
+                    
+                    for i, msg in reversed(non_system_messages):
+                        message_tokens = self.count_tokens([msg], model)
+                        if current_tokens + message_tokens <= remaining_tokens:
+                            selected_non_system.append((i, msg))
+                            current_tokens += message_tokens
+                        else:
+                            break
+                    
+                    # Reverse to restore chronological order within selected messages
+                    selected_non_system.reverse()
+                else:
+                    # Start from the oldest non-system messages and work forwards
+                    selected_non_system = []
+                    current_tokens = 0
+                    
+                    for i, msg in non_system_messages:
+                        message_tokens = self.count_tokens([msg], model)
+                        if current_tokens + message_tokens <= remaining_tokens:
+                            selected_non_system.append((i, msg))
+                            current_tokens += message_tokens
+                        else:
+                            break
+                
+                # Combine system and selected non-system messages, preserving original order
+                all_selected = system_messages + selected_non_system
+                all_selected.sort(key=lambda x: x[0])  # Sort by original index
+                
+                return [msg for _, msg in all_selected]
+            
             else:
-                other_messages = messages.copy()
-            
-            # Calculate tokens for system messages
-            system_tokens = self.count_tokens(system_messages, model) if system_messages else 0
-            
-            # Remaining tokens for other messages
-            remaining_tokens = max_tokens - system_tokens
-            
-            if remaining_tokens <= 0:
-                # If system messages exceed limit, just return system messages
-                return system_messages
-            
-            # Filter other messages to fit within remaining tokens
-            if keep_newest:
-                # Start from the end and work backwards
-                filtered_messages = []
-                current_tokens = 0
-                
-                for message in reversed(other_messages):
-                    message_tokens = self.count_tokens([message], model)
-                    if current_tokens + message_tokens <= remaining_tokens:
-                        filtered_messages.insert(0, message)
-                        current_tokens += message_tokens
-                    else:
-                        break
-                
-                # Combine system messages with filtered messages
-                return system_messages + filtered_messages
-            
-            else:
-                # Start from the beginning and work forwards
-                filtered_messages = []
-                current_tokens = 0
-                
-                for message in other_messages:
-                    message_tokens = self.count_tokens([message], model)
-                    if current_tokens + message_tokens <= remaining_tokens:
-                        filtered_messages.append(message)
-                        current_tokens += message_tokens
-                    else:
-                        break
-                
-                # Combine system messages with filtered messages
-                return system_messages + filtered_messages
+                # No system message preservation - filter all messages equally
+                if keep_newest:
+                    # Start from the newest messages and work backwards
+                    filtered_messages = []
+                    current_tokens = 0
+                    
+                    for message in reversed(messages):
+                        message_tokens = self.count_tokens([message], model)
+                        if current_tokens + message_tokens <= max_tokens:
+                            filtered_messages.insert(0, message)
+                            current_tokens += message_tokens
+                        else:
+                            break
+                    
+                    return filtered_messages
+                else:
+                    # Start from the oldest messages and work forwards
+                    filtered_messages = []
+                    current_tokens = 0
+                    
+                    for message in messages:
+                        message_tokens = self.count_tokens([message], model)
+                        if current_tokens + message_tokens <= max_tokens:
+                            filtered_messages.append(message)
+                            current_tokens += message_tokens
+                        else:
+                            break
+                    
+                    return filtered_messages
                 
         except Exception as e:
             self.log.error(f"Error limiting tokens: {str(e)}")
             # Fallback: return original messages (might exceed limit)
+            return messages
+
+    def apply_input_truncation(
+        self,
+        messages: List[Dict],
+        model: str,
+        input_truncation_override: Optional[Union[str, int]] = None,
+        keep_newest: bool = True
+    ) -> List[Dict]:
+        """
+        Apply input truncation to messages based on input_truncation setting.
+        
+        Args:
+            messages (List[Dict]): List of OpenAI message format dictionaries
+            model (str): Model name to determine input limits (format: "provider:model" or just "model")
+            input_truncation_override (Union[str, int], optional): Override the instance input_truncation setting
+            keep_newest (bool): If True, keep newest messages when truncating. If False, keep oldest (default: True)
+            
+        Returns:
+            List[Dict]: Messages truncated according to input limits, preserving original order
+        """
+        try:
+            # Use override if provided, otherwise use instance setting
+            truncation_setting = input_truncation_override if input_truncation_override is not None else self.input_truncation
+            
+            # If truncation is OFF, return messages as-is
+            if truncation_setting == "OFF":
+                return messages
+            
+            # Parse model string to get provider and model name
+            provider_name, model_name = self.provider_manager.parse_model_string(model)
+            
+            # Get model input limits
+            max_input_tokens = None
+            if truncation_setting == "AUTO":
+                # Use provider's optimized method to get input limits
+                provider = self.provider_manager.get_provider(provider_name)
+                max_input_tokens = provider.get_model_input_tokens(model_name)
+                
+                # Fallback to reasonable default if no limits found
+                if max_input_tokens is None:
+                    max_input_tokens = 128000  # Common default for modern models
+                    
+            elif isinstance(truncation_setting, int):
+                # Use provided token count
+                max_input_tokens = truncation_setting
+            else:
+                # Invalid setting, return messages as-is
+                if self.verbose:
+                    self.log.warning(f"Invalid input_truncation setting: {truncation_setting}. Using messages as-is.")
+                return messages
+            
+            # Apply token limiting
+            if max_input_tokens:
+                # Reserve some tokens for the response and overhead (roughly 20% of input limit)
+                effective_limit = int(max_input_tokens * 0.8)
+                truncated_messages = self.limit_tokens(
+                    messages=messages,
+                    max_tokens=effective_limit,
+                    model=model_name,
+                    keep_newest=keep_newest,
+                    preserve_system=True
+                )
+                
+                if self.verbose and len(truncated_messages) < len(messages):
+                    self.log.debug(f"Input truncation: {len(messages)} -> {len(truncated_messages)} messages (limit: {effective_limit} tokens)")
+                
+                return truncated_messages
+            
+            return messages
+            
+        except Exception as e:
+            self.log.error(f"Error applying input truncation: {str(e)}")
+            # Fallback: return original messages
             return messages

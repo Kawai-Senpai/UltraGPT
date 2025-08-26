@@ -15,6 +15,9 @@ MAX_CONTEXT_MESSAGES = 10
 DEFAULT_REASONING_ITERATIONS = 3
 DEFAULT_TEMPERATURE = 0.7
 
+# Token Configuration
+DEFAULT_INPUT_TRUNCATION = "AUTO"  # Can be "AUTO", "OFF", or a specific token number
+
 # Tool Selection Configuration
 TOOL_SELECTION_TEMPERATURE = 0.1
 
