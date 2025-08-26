@@ -629,7 +629,6 @@ IMPORTANT TOOL USAGE GUIDELINES:
         reasoning_model: str = None,
         tools: list = None,
         tools_config: dict = None,
-        deepthink: Optional[bool] = None,
         rag_enabled: bool = True,
         rag_labels: Optional[List[str]] = None,
         rag_top_k: int = 3
@@ -826,8 +825,7 @@ IMPORTANT TOOL USAGE GUIDELINES:
         reasoning_model: str = None,  # Format: "provider:model" or just "model" (defaults to OpenAI)
         tools: list = None,
         tools_config: dict = None,
-        max_tokens: Optional[int] = None,
-        deepthink: Optional[bool] = None
+        max_tokens: Optional[int] = None
     ):
         """
         Tool call functionality that uses UltraGPT's execution layer to determine 
