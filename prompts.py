@@ -153,14 +153,20 @@ def generate_tool_call_prompt(user_tools: list, allow_multiple: bool = True) -> 
     """Generate prompt for tool calling functionality"""
     tools_info = ""
     for tool in user_tools:
+        # Build tool info with support for both UserTool and ExpertTool
         tools_info += f"""
 Tool Name: {tool['name']}
 Description: {tool['description']}
 When to use: {tool['when_to_use']}
-Usage Guide: {tool['usage_guide']}
-Parameters Schema: {tool['parameters_schema']}
----
-"""
+Usage Guide: {tool['usage_guide']}"""
+        
+        # Add ExpertTool specific fields if present
+        if 'expert_category' in tool:
+            tools_info += f"\nExpert Category: {tool['expert_category']}"
+        if 'prerequisites' in tool and tool['prerequisites']:
+            tools_info += f"\nPrerequisites: {', '.join(tool['prerequisites'])}"
+            
+        tools_info += f"\nParameters Schema: {tool['parameters_schema']}\n---\n"
     
     multiple_instruction = "You can call multiple tools if needed." if allow_multiple else "You can only call ONE tool at a time."
     
@@ -174,7 +180,7 @@ Instructions:
 - Use your reasoning capabilities to determine which tool(s) would be most appropriate
 - Generate the exact parameters needed for each tool call based on the user's request
 - {multiple_instruction}
-- If no tools are needed, return an empty list
+- If no further tools are needed after this, use the 'stop_after_tool_call' tool to indicate no action is required after calling a tool.
 
 For each tool call, you must:
 1. Identify the most appropriate tool for the task

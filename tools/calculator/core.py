@@ -1,14 +1,11 @@
-from .decision import query_finder
-
-#* Web search ---------------------------------------------------------------
-def calculate(message, client, config, history=None):
-    """Perform web search using DuckDuckGo"""
+#* Calculator operations ---------------------------------------------------------------
+def execute_tool(parameters):
+    """Standard entry point for calculator tool - takes AI-provided parameters directly"""
     try:
-        querys = query_finder(message, client, config, history)
-        addition = querys.get("add", [])
-        subtract = querys.get("sub", [])
-        multiply = querys.get("mul", [])
-        divide = querys.get("div", [])
+        addition = parameters.get("add", [])
+        subtract = parameters.get("sub", [])
+        multiply = parameters.get("mul", [])
+        divide = parameters.get("div", [])
 
         formatted_results = []
         if addition:
@@ -37,4 +34,12 @@ def calculate(message, client, config, history=None):
 
         return "\n".join(formatted_results) if formatted_results else ""
     except Exception as e:
-        return ""
+        return f"Calculator error: {str(e)}"
+
+def calculate(message, client, config, history=None):
+    """Legacy function - now serves as fallback for direct calls"""
+    return "Calculator tool is now using native AI tool calling. Please use the UltraGPT chat interface to access calculator functions."
+
+def perform_calculations(parameters):
+    """Legacy function - redirects to standard entry point"""
+    return execute_tool(parameters)

@@ -8,7 +8,6 @@ from readability import Document
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 from googleapiclient.discovery import build
-from .decision import query_finder
 
 # Default headers for web scraping
 HEADERS = {
@@ -58,97 +57,148 @@ def scrape_url(url, timeout=15, pause=1, max_length=5000):
         time.sleep(pause)  # friendly crawl rate
 
 def google_search(query, api_key, search_engine_id, num_results=10):
-    """Perform Google Custom Search API search with comprehensive error handling"""
+    """Perform Google Custom Search API search with comprehensive error handling and eventlet compatibility"""
+    debug_info = []
     try:
         if not api_key or not search_engine_id:
-            return []
+            debug_info.append("ERROR: Missing API credentials")
+            return [], debug_info
+        
+        # Debug credential format (without exposing actual keys)
+        api_key_debug = f"API key: {api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "API key: [short key]"
+        engine_id_debug = f"Engine ID: {search_engine_id[:8]}...{search_engine_id[-4:]}" if len(search_engine_id) > 12 else f"Engine ID: {search_engine_id}"
+        debug_info.append(f"Using credentials - {api_key_debug}, {engine_id_debug}")
+        
+        # Check if we're running in eventlet environment (Celery)
+        import sys
+        is_eventlet = 'eventlet' in sys.modules
+        
+        if is_eventlet:
+            debug_info.append("Detected eventlet environment - using direct REST API")
             
-        service = build("customsearch", "v1", developerKey=api_key)
-        response = (
-            service.cse()
-            .list(q=query, cx=search_engine_id, num=min(num_results, 10))  # Google API max is 10
-            .execute()
-        )
-        return response.get("items", [])
+            # Use direct REST API call with requests (eventlet-safe)
+            import requests
+            url = "https://www.googleapis.com/customsearch/v1"
+            params = {
+                'key': api_key,
+                'cx': search_engine_id,
+                'q': query,
+                'num': min(num_results, 10)
+            }
+            
+            debug_info.append(f"Making direct REST API call to Google Custom Search")
+            response = requests.get(url, params=params, timeout=20)
+            response.raise_for_status()
+            data = response.json()
+            debug_info.append(f"REST API call completed successfully")
+            
+        else:
+            debug_info.append("Standard environment - using Google API client")
+            service = build("customsearch", "v1", developerKey=api_key)
+            debug_info.append(f"Service built successfully")
+            
+            debug_info.append(f"Executing search for query: '{query}' with {num_results} results")
+            data = (
+                service.cse()
+                .list(q=query, cx=search_engine_id, num=min(num_results, 10))  # Google API max is 10
+                .execute()
+            )
+            debug_info.append(f"API call completed successfully")
+        
+        items = data.get("items", [])
+        total_results = data.get("searchInformation", {}).get("totalResults", "0")
+        debug_info.append(f"Google API returned {len(items)} items out of {total_results} total results")
+        
+        # Debug the full response structure (first time only)
+        if items:
+            debug_info.append(f"Sample result keys: {list(items[0].keys())}")
+        else:
+            debug_info.append(f"Full response keys: {list(response.keys())}")
+            if 'searchInformation' in response:
+                search_info = response['searchInformation']
+                debug_info.append(f"Search info: {search_info}")
+        
+        return items, debug_info
         
     except Exception as e:
-        # Silently fail and return empty results - errors will be logged by caller
-        return []
+        debug_info.append(f"ERROR in Google API call: {type(e).__name__}: {str(e)}")
+        import traceback
+        debug_info.append(f"Full traceback: {traceback.format_exc()}")
+        return [], debug_info
 
 #* Web search ---------------------------------------------------------------
-def web_search(message, client, config, history=None):
-    """Perform web search using Google Custom Search API with optional scraping"""
+def execute_tool(parameters):
+    """Standard entry point for web search tool - takes AI-provided parameters directly"""
     try:
-        # Get required API credentials
-        api_key = config.get("google_api_key")
-        search_engine_id = config.get("search_engine_id")
+        query = parameters.get("query")
+        url = parameters.get("url")
+        num_results = parameters.get("num_results", 5)
         
-        if not api_key or not search_engine_id:
-            return ""
+        # Handle query parameter - it might come as a list or string
+        if isinstance(query, list):
+            query = query[0] if query else None
         
-        # Get search queries
-        queries = query_finder(message, client, config, history).get("query", [])
-        if not queries:
-            return ""
-        
-        # Configuration options
-        max_results = config.get("max_results", 5)
-        enable_scraping = config.get("enable_scraping", True)
-        max_scrape_length = config.get("max_scrape_length", 5000)
-        scrape_timeout = config.get("scrape_timeout", 15)
-        scrape_pause = config.get("scrape_pause", 1)
-        
-        formatted_results = []
-        total_results_collected = 0
-        
-        for query in queries:
-            if total_results_collected >= max_results:
-                break
-                
-            # Calculate how many results we still need
-            results_needed = max_results - total_results_collected
+        if url:
+            # URL scraping mode
+            try:
+                content = scrape_url(url)
+                if content:
+                    return f"Content from {url}:\n{content}"
+                else:
+                    return f"Unable to scrape content from {url} (blocked or error)"
+            except Exception as e:
+                return f"Error scraping URL {url}: {str(e)}"
+        elif query:
+            # Web search mode - get credentials from thread-local context
+            try:
+                from .context import get_credentials
+                api_key, search_engine_id = get_credentials()
+                if not api_key or not search_engine_id:
+                    # Fallback to environment variables
+                    api_key = os.getenv('GOOGLE_API_KEY')
+                    search_engine_id = os.getenv('GOOGLE_SEARCH_ENGINE_ID')
+            except ImportError:
+                # Fallback to environment variables
+                api_key = os.getenv('GOOGLE_API_KEY')
+                search_engine_id = os.getenv('GOOGLE_SEARCH_ENGINE_ID')
             
-            # Perform Google search with limited results
-            search_results = google_search(query, api_key, search_engine_id, results_needed)
+            # Debug credential status
+            credential_status = f"API key: {'✓' if api_key else '✗'}, Search Engine ID: {'✓' if search_engine_id else '✗'}"
             
-            if not search_results:
-                continue
-                
-            for result in search_results:
-                if total_results_collected >= max_results:
-                    break
-                    
-                title = result.get("title", "")
-                url = result.get("link", "")
-                snippet = result.get("snippet", "")
-                
-                result_text = f"Title: {title}\nURL: {url}\nSnippet: {snippet}\n"
-                
-                # Optionally scrape the full content
-                if enable_scraping and url:
-                    try:
-                        scraped_content = scrape_url(
-                            url, 
-                            timeout=scrape_timeout, 
-                            pause=scrape_pause,
-                            max_length=max_scrape_length
-                        )
-                        if scraped_content:
-                            result_text += f"Full Content: {scraped_content}\n"
-                        else:
-                            result_text += f"Content: Unable to scrape (blocked or error)\n"
-                    except Exception:
-                        # Silently continue if scraping fails for individual URLs
-                        result_text += f"Content: Unable to scrape (blocked or error)\n"
-                
-                formatted_results.append(result_text)
-                total_results_collected += 1
-        
-        if not formatted_results:
-            return ""
+            if not api_key or not search_engine_id:
+                return f"Google API credentials not configured. {credential_status}. Please provide google_api_key and search_engine_id to UltraGPT constructor or set environment variables GOOGLE_API_KEY and GOOGLE_SEARCH_ENGINE_ID."
             
-        return "\n---\n".join(formatted_results)
-        
-    except Exception:
-        # Return empty string on any error - let the caller handle logging
-        return ""
+            try:
+                search_results, debug_info = google_search(query, api_key, search_engine_id, num_results)
+                
+                # Include debug info in response for troubleshooting
+                debug_section = "\n".join(debug_info)
+                
+                if not search_results:
+                    return f"No search results found for query: '{query}'. {credential_status}.\n\nDEBUG INFO:\n{debug_section}\n\nThis may be due to: 1) Invalid API credentials, 2) Quota exceeded, 3) No matching results for this query, 4) API configuration issues."
+                
+                formatted_results = []
+                for result in search_results:
+                    title = result.get("title", "")
+                    url = result.get("link", "")
+                    snippet = result.get("snippet", "")
+                    formatted_results.append(f"Title: {title}\nURL: {url}\nSnippet: {snippet}")
+                
+                return f"Search results for '{query}':\n\n" + "\n---\n".join(formatted_results) + f"\n\nDEBUG INFO:\n{debug_section}"
+            except Exception as e:
+                return f"Error searching for '{query}': {str(e)}. {credential_status}. Check your Google API credentials and quota."
+        else:
+            return "Please provide either a 'query' for web search or a 'url' for scraping."
+    except Exception as e:
+        return f"Web search tool error: {str(e)}"
+
+def web_search(message, client, config, history=None):
+    """Legacy function - now serves as fallback for direct calls"""
+    return "Web search tool is now using native AI tool calling. Please use the UltraGPT chat interface to access web search functions."
+
+def perform_web_search(queries, config):
+    """Legacy function - now serves as fallback for old parameter format"""
+    if isinstance(queries, list) and queries:
+        # Convert old format to new format
+        return execute_tool({"query": queries[0], "num_results": 5})
+    return "Invalid query format for web search."
