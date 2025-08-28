@@ -381,7 +381,7 @@ class ClaudeProvider(BaseProvider):
         return converted_messages, system_prompt
         
     def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
-        """Claude chat completion"""
+        """Claude chat completion with streaming to avoid timeout issues"""
         converted_messages, system_prompt = self.convert_messages(messages)
         
         kwargs = {
@@ -404,15 +404,18 @@ class ClaudeProvider(BaseProvider):
         
         if system_prompt:
             kwargs["system"] = system_prompt
+        
+        # Use streaming to avoid 10-minute timeout issues
+        with self.client.messages.stream(**kwargs) as stream:
+            response = stream.get_final_message()
             
-        response = self.client.messages.create(**kwargs)
         content = response.content[0].text.strip()
         tokens = response.usage.input_tokens + response.usage.output_tokens
         return content, tokens
         
     def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
         """
-        Claude structured output with schema using tool-based approach
+        Claude structured output with schema using tool-based approach with streaming
         
         Note: Claude doesn't support OpenAI's response_format parameter.
         Instead, we use Claude's tool calling feature to enforce structured output:
@@ -459,8 +462,10 @@ class ClaudeProvider(BaseProvider):
         
         if system_prompt:
             kwargs["system"] = system_prompt
-            
-        response = self.client.messages.create(**kwargs)
+        
+        # Use streaming to avoid 10-minute timeout issues
+        with self.client.messages.stream(**kwargs) as stream:
+            response = stream.get_final_message()
         
         # Extract the tool call result
         tool_use_block = None
@@ -487,7 +492,7 @@ class ClaudeProvider(BaseProvider):
         return content, tokens
         
     def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
-        """Claude native tool calling - always requires at least one tool to be called"""
+        """Claude native tool calling with streaming - always requires at least one tool to be called"""
         converted_messages, system_prompt = self.convert_messages(messages)
         
         # Convert OpenAI-format tools to Claude format
@@ -532,8 +537,10 @@ class ClaudeProvider(BaseProvider):
         
         if system_prompt:
             kwargs["system"] = system_prompt
-            
-        response = self.client.messages.create(**kwargs)
+        
+        # Use streaming to avoid 10-minute timeout issues
+        with self.client.messages.stream(**kwargs) as stream:
+            response = stream.get_final_message()
         
         # Convert Claude response to standardized format
         message_dict = {
