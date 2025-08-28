@@ -1,20 +1,15 @@
-def make_query(message: str) -> str:
-    example = """Your output should look like this (example):
-{
-    "add": [2.0, 3.0, 5.1],
-    "sub": [10.0, 5.1, 5.2],
-    "mul": [2.5, 3.7, 6.1],
-    "div": [10.7, 2.9, 5.8]
-}
-"""
-    return f"""This is a user message. Come up a output like the given example and the calculator will return the result.
-This is a calculator tool. Analyze if this user message requires any calculations. And come up with the numbers to calculate.
+# Calculator Tool Configuration
+_info = "This allows you to perform basic mathematical calculations (addition, subtraction, multiplication, division)."
 
-Message: "{message}"
+_description = """This is a calculator tool that performs basic arithmetic operations. Analyze the user's message and provide the numbers for calculation.
 
-{example}
+Available operations:
+- add: Addition of numbers
+- sub: Subtraction of numbers (first number minus subsequent numbers)
+- mul: Multiplication of numbers  
+- div: Division of numbers (first number divided by subsequent numbers)
 
 Rules:
-- It is not mandetory to use all the operations. If nothing is needed, return empty array.
-- The calculation query should be able to help the chatbot/user answer the question.
-"""
+- Use empty arrays for operations not needed
+- Provide numbers in the order they should be calculated
+- For subtraction and division, first number is the base, others are subtracted/divided from it"""

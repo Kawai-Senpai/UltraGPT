@@ -1,8 +1,10 @@
-openai==1.59.3
+openai==1.99.5
 ultraprint==3.2.0
+anthropic==0.60.0
 pydantic==2.10.4
 google-api-python-client>=2.0.0
 requests>=2.25.0
 beautifulsoup4>=4.9.0
 readability-lxml>=0.8.0
 lxml>=4.6.0
+tiktoken>=0.11.0
