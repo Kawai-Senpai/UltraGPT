@@ -18,6 +18,12 @@ DEFAULT_TEMPERATURE = 0.7
 # Token Configuration
 DEFAULT_INPUT_TRUNCATION = "AUTO"  # Can be "AUTO", "OFF", or a specific token number
 
+# Rate Limit Retry Configuration
+RATE_LIMIT_RETRIES = 5  # Number of retries for rate limit errors
+RATE_LIMIT_BASE_DELAY = 10  # Base delay in seconds (will use exponential backoff)
+RATE_LIMIT_MAX_DELAY = 60  # Maximum delay in seconds
+RATE_LIMIT_BACKOFF_MULTIPLIER = 2  # Multiplier for exponential backoff
+
 # Tool Selection Configuration
 TOOL_SELECTION_TEMPERATURE = 0.1
 

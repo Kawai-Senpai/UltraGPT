@@ -2,6 +2,8 @@
 Provider abstraction layer for different AI providers (OpenAI, Claude, etc.)
 """
 import json
+import time
+import random
 from openai import OpenAI
 try:
     from anthropic import Anthropic
@@ -9,6 +11,59 @@ except ImportError:
     Anthropic = None
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Union
+from . import config
+
+
+def is_rate_limit_error(error) -> bool:
+    """Check if an error is a rate limit error for any provider"""
+    error_str = str(error).lower()
+    error_code = getattr(error, 'status_code', None) or getattr(error, 'code', None)
+    
+    # Check for HTTP 429 status code
+    if error_code == 429:
+        return True
+        
+    # Check for rate limit keywords in error message
+    rate_limit_keywords = [
+        'rate limit', 'rate_limit', 'too many requests', 'quota exceeded',
+        'request limit', 'usage limit', 'throttle', 'rate-limit'
+    ]
+    
+    return any(keyword in error_str for keyword in rate_limit_keywords)
+
+
+def retry_on_rate_limit(func):
+    """Decorator to retry API calls on rate limit errors with exponential backoff"""
+    def wrapper(*args, **kwargs):
+        max_retries = config.RATE_LIMIT_RETRIES
+        base_delay = config.RATE_LIMIT_BASE_DELAY
+        max_delay = config.RATE_LIMIT_MAX_DELAY
+        multiplier = config.RATE_LIMIT_BACKOFF_MULTIPLIER
+        
+        for attempt in range(max_retries + 1):  # +1 for the initial attempt
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if not is_rate_limit_error(e):
+                    # Not a rate limit error, re-raise immediately
+                    raise
+                    
+                if attempt == max_retries:
+                    # Final attempt failed, re-raise the error
+                    raise
+                
+                # Calculate delay with exponential backoff and jitter
+                delay = min(base_delay * (multiplier ** attempt), max_delay)
+                jitter = random.uniform(0.1, 0.3) * delay  # Add 10-30% jitter
+                total_delay = delay + jitter
+                
+                print(f"Rate limit hit, retrying in {total_delay:.2f} seconds (attempt {attempt + 1}/{max_retries + 1})")
+                time.sleep(total_delay)
+        
+        # This shouldn't be reached, but just in case
+        raise Exception("Maximum retries exceeded for rate limit")
+    
+    return wrapper
 
 
 class BaseProvider:
@@ -145,6 +200,7 @@ class OpenAIProvider(BaseProvider):
         
         return None
         
+    @retry_on_rate_limit
     def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
         """Standard OpenAI chat completion"""
         kwargs = {
@@ -171,6 +227,7 @@ class OpenAIProvider(BaseProvider):
         tokens = response.usage.total_tokens
         return content, tokens
         
+    @retry_on_rate_limit
     def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
         """OpenAI structured output with schema"""
         kwargs = {
@@ -199,6 +256,7 @@ class OpenAIProvider(BaseProvider):
         tokens = response.usage.total_tokens
         return content, tokens
         
+    @retry_on_rate_limit
     def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
         """OpenAI native tool calling - always requires at least one tool to be called"""
         kwargs = {
@@ -380,6 +438,7 @@ class ClaudeProvider(BaseProvider):
         system_prompt = "\n\n".join(system_parts) if system_parts else None
         return converted_messages, system_prompt
         
+    @retry_on_rate_limit
     def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
         """Claude chat completion with streaming to avoid timeout issues"""
         converted_messages, system_prompt = self.convert_messages(messages)
@@ -413,6 +472,7 @@ class ClaudeProvider(BaseProvider):
         tokens = response.usage.input_tokens + response.usage.output_tokens
         return content, tokens
         
+    @retry_on_rate_limit
     def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
         """
         Claude structured output with schema using tool-based approach with streaming
@@ -491,6 +551,7 @@ class ClaudeProvider(BaseProvider):
         tokens = response.usage.input_tokens + response.usage.output_tokens
         return content, tokens
         
+    @retry_on_rate_limit
     def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
         """Claude native tool calling with streaming - always requires at least one tool to be called"""
         converted_messages, system_prompt = self.convert_messages(messages)
