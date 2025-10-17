@@ -4,6 +4,9 @@ Provider abstraction layer for different AI providers (OpenAI, Claude, etc.)
 import json
 import time
 import random
+import logging
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from openai import OpenAI
 try:
     from anthropic import Anthropic
@@ -13,6 +16,31 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Union
 from . import config
 
+logger = logging.getLogger(__name__)
+
+def _parse_retry_after(retry_after_value: Optional[str]) -> Optional[float]:
+    """Convert Retry-After header value to seconds."""
+    if not retry_after_value:
+        return None
+
+    try:
+        return float(retry_after_value)
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        retry_datetime = parsedate_to_datetime(retry_after_value)
+    except (TypeError, ValueError):
+        return None
+
+    if retry_datetime is None:
+        return None
+
+    if retry_datetime.tzinfo is None:
+        retry_datetime = retry_datetime.replace(tzinfo=timezone.utc)
+
+    delay_seconds = (retry_datetime - datetime.now(timezone.utc)).total_seconds()
+    return max(0.0, delay_seconds)
 
 def is_rate_limit_error(error) -> bool:
     """Check if an error is a rate limit error for any provider"""
@@ -31,7 +59,6 @@ def is_rate_limit_error(error) -> bool:
     
     return any(keyword in error_str for keyword in rate_limit_keywords)
 
-
 def retry_on_rate_limit(func):
     """Decorator to retry API calls on rate limit errors with exponential backoff"""
     def wrapper(*args, **kwargs):
@@ -44,27 +71,56 @@ def retry_on_rate_limit(func):
             try:
                 return func(*args, **kwargs)
             except Exception as e:
-                if not is_rate_limit_error(e):
-                    # Not a rate limit error, re-raise immediately
+                attempt_number = attempt + 1
+                total_attempts = max_retries + 1
+                logger.error(
+                    "Provider call %s.%s failed on attempt %d/%d: %s",
+                    func.__module__,
+                    func.__name__,
+                    attempt_number,
+                    total_attempts,
+                    e,
+                    exc_info=True
+                )
+
+                if not is_rate_limit_error(e) or attempt == max_retries:
+                    # Not a rate limit error or we've exhausted retries.
                     raise
-                    
-                if attempt == max_retries:
-                    # Final attempt failed, re-raise the error
-                    raise
-                
-                # Calculate delay with exponential backoff and jitter
-                delay = min(base_delay * (multiplier ** attempt), max_delay)
-                jitter = random.uniform(0.1, 0.3) * delay  # Add 10-30% jitter
-                total_delay = delay + jitter
-                
-                print(f"Rate limit hit, retrying in {total_delay:.2f} seconds (attempt {attempt + 1}/{max_retries + 1})")
+
+                response = getattr(e, "response", None)
+                headers = getattr(response, "headers", {}) or {}
+                retry_after_header = None
+                for header_key, header_value in headers.items():
+                    if header_key.lower() == "retry-after":
+                        retry_after_header = header_value
+                        break
+
+                header_delay = _parse_retry_after(retry_after_header)
+
+                if header_delay is not None:
+                    total_delay = header_delay
+                    delay_source = "retry-after header"
+                else:
+                    delay = min(base_delay * (multiplier ** attempt), max_delay)
+                    jitter = random.uniform(0.1, 0.3) * delay  # Add 10-30% jitter
+                    total_delay = delay + jitter
+                    delay_source = "exponential backoff"
+
+                logger.info(
+                    "Rate limit hit for %s.%s, retrying in %.2f seconds via %s (attempt %d/%d)",
+                    func.__module__,
+                    func.__name__,
+                    total_delay,
+                    delay_source,
+                    attempt_number,
+                    total_attempts
+                )
                 time.sleep(total_delay)
         
         # This shouldn't be reached, but just in case
         raise Exception("Maximum retries exceeded for rate limit")
     
     return wrapper
-
 
 class BaseProvider:
     """Base class for AI providers"""
@@ -132,6 +188,7 @@ class OpenAIProvider(BaseProvider):
     NO_MAX_TOKENS_MODELS = ["o1", "o2", "o3", "o4", "gpt-5"]
     LIMITS = {
         "gpt-5": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "gpt-5-pro": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "gpt-5-mini": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "gpt-5-nano": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "gpt-5-chat-latest": {"max_input_tokens": 128000, "max_output_tokens": 16384},
@@ -319,6 +376,7 @@ class ClaudeProvider(BaseProvider):
         "claude-opus-4-1": {"max_input_tokens": 200000, "max_output_tokens": 32000},
         "claude-opus-4": {"max_input_tokens": 200000, "max_output_tokens": 32000},
         "claude-sonnet-4": {"max_input_tokens": 200000, "max_output_tokens": 64000},
+        "claude-sonnet-4-5": {"max_input_tokens": 200000, "max_output_tokens": 64000},
         "claude-3-7-sonnet": {"max_input_tokens": 200000, "max_output_tokens": 64000},
         "claude-3-5-haiku": {"max_input_tokens": 200000, "max_output_tokens": 8192},
         "claude-3-haiku": {"max_input_tokens": 200000, "max_output_tokens": 4096},
