@@ -5,6 +5,8 @@ import json
 import time
 import random
 import logging
+import importlib
+import threading
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from openai import OpenAI
@@ -13,10 +15,37 @@ try:
 except ImportError:
     Anthropic = None
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Tuple
 from . import config
 
 logger = logging.getLogger(__name__)
+
+_openai_modules_warmed = False
+_openai_warm_lock = threading.Lock()
+
+def _warm_openai_modules() -> None:
+    """Preload OpenAI resource modules to avoid ModuleLock deadlocks under threading."""
+    global _openai_modules_warmed
+    if _openai_modules_warmed:
+        return
+
+    with _openai_warm_lock:
+        if _openai_modules_warmed:
+            return
+
+        module_names = [
+            "openai.resources.chat",
+            "openai.resources.responses",
+            "openai.resources.responses.responses",
+        ]
+
+        for module_name in module_names:
+            try:
+                importlib.import_module(module_name)
+            except Exception as warm_exc:
+                logger.debug("Optional OpenAI warmup import failed for %s: %s", module_name, warm_exc)
+
+        _openai_modules_warmed = True
 
 def _parse_retry_after(retry_after_value: Optional[str]) -> Optional[float]:
     """Convert Retry-After header value to seconds."""
@@ -179,7 +208,6 @@ class BaseProvider:
         """
         return messages, None
 
-
 class OpenAIProvider(BaseProvider):
     """OpenAI provider implementation"""
     
@@ -218,10 +246,16 @@ class OpenAIProvider(BaseProvider):
 
     def __init__(self, api_key: str, **kwargs):
         super().__init__(api_key, **kwargs)
+        _warm_openai_modules()
         self.client = OpenAI(api_key=api_key)
         
         # Pre-sort model keys by length (longest first) for efficient substring matching
         self._sorted_model_keys = sorted([k for k in self.LIMITS.keys() if k != "default"], key=len, reverse=True)
+
+        # Track which response.id produced each tool call_id for follow-up chaining
+        self._callid_to_responseid: Dict[str, str] = {}
+
+        self._warm_client_resources()
         
     def _should_include_temperature(self, model: str) -> bool:
         """Check if model supports temperature parameter"""
@@ -230,7 +264,131 @@ class OpenAIProvider(BaseProvider):
     def _should_include_max_tokens(self, model: str) -> bool:
         """Check if model supports max_tokens parameter"""
         return not any(prefix in model for prefix in self.NO_MAX_TOKENS_MODELS)
+
+    def _warm_client_resources(self) -> None:
+        """Trigger lazy client imports to avoid contention under concurrent execution."""
+        try:
+            _ = self.client.chat.completions
+        except Exception as warm_exc:
+            logger.debug("OpenAI chat warmup failed: %s", warm_exc)
+
+        try:
+            _ = self.client.responses
+        except Exception as warm_exc:
+            logger.debug("OpenAI responses warmup failed: %s", warm_exc)
     
+    def convert_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Translate Chat Completions-style payloads to Responses API format.
+
+        Handles message normalization, instruction extraction, tool flattening,
+        and previous response chaining in a single pass (mirroring the Claude
+        provider approach for simplicity).
+        """
+        items: List[Dict[str, Any]] = []
+        function_outputs: List[Dict[str, Any]] = []
+        instruction_parts: List[str] = []
+        tool_result_ids: List[str] = []
+
+        for message in messages:
+            role = message.get("role")
+
+            if role in ("system", "developer"):
+                # Track instruction text for follow-up responses while still
+                # passing the content through to the Responses API payload.
+                content_value = message.get("content")
+                if isinstance(content_value, str) and content_value.strip():
+                    instruction_parts.append(content_value.strip())
+
+            if role in ("tool", "function"):
+                call_id = (
+                    message.get("tool_call_id")
+                    or message.get("call_id")
+                    or message.get("id")
+                    or message.get("name")
+                )
+                if call_id:
+                    tool_result_ids.append(call_id)
+
+                output = message.get("content")
+                if not isinstance(output, str):
+                    output = json.dumps(output or "")
+
+                function_payload = {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": output,
+                }
+                items.append(function_payload)
+                function_outputs.append(function_payload)
+                continue
+
+            if role in ("system", "user", "assistant", "developer"):
+                content = message.get("content", "")
+                if isinstance(content, str):
+                    content_payload = {"type": "input_text", "text": content}
+                else:
+                    content_payload = {
+                        "type": "input_text",
+                        "text": json.dumps(content),
+                    }
+
+                items.append({
+                    "role": role,
+                    "content": [content_payload],
+                })
+                continue
+
+            # Ignore any other roles to preserve current caller behavior.
+
+        previous_response_id = None
+        for call_id in tool_result_ids:
+            mapped_id = self._callid_to_responseid.get(call_id)
+            if mapped_id:
+                previous_response_id = mapped_id
+                break
+
+        normalized_tools: Optional[List[Dict[str, Any]]] = None
+        if tools:
+            normalized_tools = []
+            for tool in tools:
+                if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+                    fn = tool["function"]
+                    flattened = {
+                        "type": "function",
+                        "name": fn.get("name"),
+                        "description": fn.get("description") or tool.get("description"),
+                        "parameters": fn.get("parameters")
+                        or fn.get("json_schema")
+                        or tool.get("parameters"),
+                    }
+                    if "strict" in fn:
+                        flattened["strict"] = fn["strict"]
+                    elif "strict" in tool:
+                        flattened["strict"] = tool["strict"]
+                    normalized_tools.append(flattened)
+                else:
+                    normalized_tools.append(dict(tool))
+
+            for idx, tool in enumerate(normalized_tools):
+                if tool.get("type") == "function":
+                    if not tool.get("name"):
+                        raise ValueError(f"tools[{idx}].name is required for Responses API")
+                    if "parameters" not in tool or tool["parameters"] is None:
+                        tool["parameters"] = {"type": "object", "properties": {}}
+
+        metadata = {
+            "previous_response_id": previous_response_id,
+            "instructions": "\n\n".join(instruction_parts) if instruction_parts else None,
+            "tools": normalized_tools,
+            "function_call_outputs": function_outputs,
+        }
+
+        return items, metadata
+
     def _get_model_max_output_tokens(self, model: str) -> Optional[int]:
         """Get model-specific max output tokens from LIMITS, returns None if not found"""
         # Use pre-sorted keys for efficient longest-first matching
@@ -259,55 +417,68 @@ class OpenAIProvider(BaseProvider):
         
     @retry_on_rate_limit
     def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
-        """Standard OpenAI chat completion"""
-        kwargs = {
-            "model": model,
-            "messages": messages,
-            "stream": False
-        }
-        
-        # Only add temperature if model supports it
+        """Standard OpenAI chat completion using Responses API."""
+        items, metadata = self.convert_messages(messages)
+
+        kwargs: Dict[str, Any] = {"model": model, "input": items}
+
+        prev_id = metadata.get("previous_response_id")
+        if prev_id:
+            fn_outputs = metadata.get("function_call_outputs", [])
+            if not fn_outputs:
+                raise RuntimeError("Tool output detected but no function_call_output items were formed.")
+            kwargs["input"] = fn_outputs
+            kwargs["previous_response_id"] = prev_id
+
+            instructions = metadata.get("instructions")
+            if instructions:
+                kwargs["instructions"] = instructions
+
         if self._should_include_temperature(model):
             kwargs["temperature"] = temperature
-        
-        # Only add max_tokens if it's not None and model supports it
+
         if max_tokens is not None and self._should_include_max_tokens(model):
-            kwargs["max_tokens"] = max_tokens
+            kwargs["max_output_tokens"] = max_tokens
         elif max_tokens is None and self._should_include_max_tokens(model):
-            # Use model-specific output limit if max_tokens is None
             model_limit = self._get_model_max_output_tokens(model)
             if model_limit is not None:
-                kwargs["max_tokens"] = model_limit
-            
-        response = self.client.chat.completions.create(**kwargs)
-        content = response.choices[0].message.content.strip()
+                kwargs["max_output_tokens"] = model_limit
+
+        response = self.client.responses.create(**kwargs)
+        content = (response.output_text or "").strip()
         tokens = response.usage.total_tokens
         return content, tokens
         
     @retry_on_rate_limit
     def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
-        """OpenAI structured output with schema"""
-        kwargs = {
-            "model": model,
-            "messages": messages,
-            "response_format": schema
-        }
-        
-        # Only add temperature if model supports it
+        """OpenAI structured output with schema using Responses API."""
+        items, metadata = self.convert_messages(messages)
+
+        kwargs: Dict[str, Any] = {"model": model, "input": items, "text_format": schema}
+
+        prev_id = metadata.get("previous_response_id")
+        if prev_id:
+            fn_outputs = metadata.get("function_call_outputs", [])
+            if not fn_outputs:
+                raise RuntimeError("Tool output detected but no function_call_output items were formed.")
+            kwargs["input"] = fn_outputs
+            kwargs["previous_response_id"] = prev_id
+            instructions = metadata.get("instructions")
+            if instructions:
+                kwargs["instructions"] = instructions
+
         if self._should_include_temperature(model):
             kwargs["temperature"] = temperature
-        
-        # Only add max_tokens if it's not None and model supports it
+
         if max_tokens is not None and self._should_include_max_tokens(model):
-            kwargs["max_tokens"] = max_tokens
+            kwargs["max_output_tokens"] = max_tokens
         elif max_tokens is None and self._should_include_max_tokens(model):
-            # Use model-specific output limit if max_tokens is None
             model_limit = self._get_model_max_output_tokens(model)
             if model_limit is not None:
-                kwargs["max_tokens"] = model_limit
-            
-        response = self.client.beta.chat.completions.parse(**kwargs)
-        content = response.choices[0].message.parsed
+                kwargs["max_output_tokens"] = model_limit
+
+        response = self.client.responses.parse(**kwargs)
+        content = response.output_parsed
         if isinstance(content, BaseModel):
             content = content.model_dump(by_alias=True)
         tokens = response.usage.total_tokens
@@ -315,56 +486,126 @@ class OpenAIProvider(BaseProvider):
         
     @retry_on_rate_limit
     def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
-        """OpenAI native tool calling - always requires at least one tool to be called"""
-        kwargs = {
-            "model": model,
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": "required"  # Always require the AI to choose at least one tool
-        }
+        """OpenAI native tool calling via Responses API - tool use is required."""
+        items, metadata = self.convert_messages(messages, tools)
+
+        normalized_tools = metadata.get("tools") or []
         
-        # Only add temperature if model supports it
+        # Check if this is a follow-up with tool results
+        prev_id = metadata.get("previous_response_id")
+        fn_outputs = metadata.get("function_call_outputs", [])
+        is_follow_up = prev_id and fn_outputs
+
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "input": items,
+        }
+
+        # For follow-up requests with tool outputs
+        if is_follow_up:
+            # Only send the function_call_output items and link to previous response
+            kwargs["input"] = fn_outputs
+            kwargs["previous_response_id"] = prev_id
+            instructions = metadata.get("instructions")
+            if instructions:
+                kwargs["instructions"] = instructions
+            # Do NOT send tools or tool_choice in follow-up requests
+        else:
+            # Initial tool request - must have tools
+            if not normalized_tools:
+                raise ValueError("tool_choice='required' but tools list is empty")
+            kwargs["tools"] = normalized_tools
+            kwargs["tool_choice"] = "required"
+
+        if parallel_tool_calls is not None and not is_follow_up:
+            kwargs["parallel_tool_calls"] = parallel_tool_calls
+
         if self._should_include_temperature(model):
             kwargs["temperature"] = temperature
-        
-        # Only add max_tokens if it's not None and model supports it
+
         if max_tokens is not None and self._should_include_max_tokens(model):
-            kwargs["max_tokens"] = max_tokens
+            kwargs["max_output_tokens"] = max_tokens
         elif max_tokens is None and self._should_include_max_tokens(model):
-            # Use model-specific output limit if max_tokens is None
             model_limit = self._get_model_max_output_tokens(model)
             if model_limit is not None:
-                kwargs["max_tokens"] = model_limit
-            
-        # Add parallel_tool_calls if specified (OpenAI specific)
-        if parallel_tool_calls is not None:
-            kwargs["parallel_tool_calls"] = parallel_tool_calls
-            
-        response = self.client.chat.completions.create(**kwargs)
-        response_message = response.choices[0].message
-        
-        # Convert to dict format for consistency
-        message_dict = {
+                kwargs["max_output_tokens"] = model_limit
+
+        response = self.client.responses.create(**kwargs)
+
+        message_dict: Dict[str, Any] = {
             "role": "assistant",
-            "content": response_message.content
+            "content": None,
         }
-        
-        # Add tool_calls if present
-        if response_message.tool_calls:
-            message_dict["tool_calls"] = []
-            for tool_call in response_message.tool_calls:
-                message_dict["tool_calls"].append({
-                    "id": tool_call.id,
-                    "type": tool_call.type,
+
+        text_content = (response.output_text or "").strip()
+        if text_content:
+            message_dict["content"] = text_content
+
+        tool_calls_list: List[Dict[str, Any]] = []
+
+        # Normalize Responses API tool calls to the existing format
+        for item in getattr(response, "output", []) or []:
+            item_type = getattr(item, "type", None)
+
+            if item_type in {"tool_call", "function_call", "tool_use"}:
+                call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+                func_name = getattr(item, "name", None) or getattr(item, "tool_name", None)
+                arguments = getattr(item, "arguments", None) or getattr(item, "input", None)
+                if not isinstance(arguments, str):
+                    try:
+                        arguments = json.dumps(arguments)
+                    except Exception:
+                        arguments = str(arguments)
+                tool_calls_list.append({
+                    "id": call_id,
+                    "type": "function",
                     "function": {
-                        "name": tool_call.function.name,
-                        "arguments": tool_call.function.arguments
+                        "name": func_name,
+                        "arguments": arguments,
                     }
                 })
-        
+
+            elif item_type == "message":
+                for content_item in getattr(item, "content", []) or []:
+                    content_type = getattr(content_item, "type", None)
+                    if content_type in {"tool_call", "function_call", "tool_use"}:
+                        call_id = getattr(content_item, "tool_call_id", None) or getattr(content_item, "id", None)
+                        func_name = getattr(content_item, "name", None) or getattr(content_item, "tool_name", None)
+                        arguments = getattr(content_item, "arguments", None) or getattr(content_item, "input", None)
+                        if not isinstance(arguments, str):
+                            try:
+                                arguments = json.dumps(arguments)
+                            except Exception:
+                                arguments = str(arguments)
+                        tool_calls_list.append({
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": func_name,
+                                "arguments": arguments,
+                            }
+                        })
+                    elif content_type in {"text", "output_text"}:
+                        segment = getattr(content_item, "text", "").strip()
+                        if segment:
+                            message_dict["content"] = (
+                                f"{message_dict['content']}\n{segment}".strip()
+                                if message_dict["content"]
+                                else segment
+                            )
+
+        # Remember which response produced each call_id for follow-up chaining
+        resp_id = response.id
+        for tc in tool_calls_list:
+            cid = tc.get("id")
+            if cid:
+                self._callid_to_responseid[cid] = resp_id
+
+        if tool_calls_list:
+            message_dict["tool_calls"] = tool_calls_list
+
         tokens = response.usage.total_tokens
         return message_dict, tokens
-
 
 class ClaudeProvider(BaseProvider):
     """Anthropic Claude provider implementation"""
@@ -695,7 +936,6 @@ class ClaudeProvider(BaseProvider):
         
         tokens = response.usage.input_tokens + response.usage.output_tokens
         return message_dict, tokens
-
 
 class ProviderManager:
     """Manages different AI providers"""
