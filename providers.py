@@ -328,11 +328,12 @@ class OpenAIProvider(BaseProvider):
 
             if role in ("system", "user", "assistant", "developer"):
                 content = message.get("content", "")
+                content_type = "output_text" if role == "assistant" else "input_text"
                 if isinstance(content, str):
-                    content_payload = {"type": "input_text", "text": content}
+                    content_payload = {"type": content_type, "text": content}
                 else:
                     content_payload = {
-                        "type": "input_text",
+                        "type": content_type,
                         "text": json.dumps(content),
                     }
 
