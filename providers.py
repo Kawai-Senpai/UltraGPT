@@ -418,7 +418,7 @@ class OpenAIProvider(BaseProvider):
         
     @retry_on_rate_limit
     def chat_completion(self, messages: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
-        """Standard OpenAI chat completion using Responses API."""
+        """Standard OpenAI chat completion using Responses API - now with streaming."""
         items, metadata = self.convert_messages(messages)
 
         kwargs: Dict[str, Any] = {"model": model, "input": items}
@@ -445,17 +445,38 @@ class OpenAIProvider(BaseProvider):
             if model_limit is not None:
                 kwargs["max_output_tokens"] = model_limit
 
-        response = self.client.responses.create(**kwargs)
-        content = (response.output_text or "").strip()
-        tokens = response.usage.total_tokens
+        # Streaming - collect deltas, then read the final response for usage
+        # This avoids the 10-minute timeout issue for long-running jobs
+        full_text_parts: List[str] = []
+        with self.client.responses.stream(**kwargs) as stream:
+            for event in stream:
+                if getattr(event, "type", "") == "response.output_text.delta":
+                    delta = getattr(event, "delta", "") or ""
+                    # Optional: push to UI here if needed: on_delta(delta)
+                    full_text_parts.append(delta)
+
+            final = stream.get_final_response()
+
+        # Prefer OpenAI's assembled output_text, fall back to our accumulation
+        content = (getattr(final, "output_text", None) or "".join(full_text_parts)).strip()
+        tokens = final.usage.total_tokens
         return content, tokens
         
     @retry_on_rate_limit
     def chat_completion_with_schema(self, messages: List[Dict], schema: BaseModel, model: str, temperature: float, max_tokens: Optional[int] = None, deepthink: Optional[bool] = None) -> tuple:
-        """OpenAI structured output with schema using Responses API."""
+        """OpenAI structured output with schema using Responses API - streaming version.
+        
+        Attempts to use text_format with streaming. Falls back to collecting JSON output
+        and validating with Pydantic if server-side schema enforcement isn't available.
+        """
         items, metadata = self.convert_messages(messages)
 
-        kwargs: Dict[str, Any] = {"model": model, "input": items, "text_format": schema}
+        # Try using text_format with streaming - server may enforce schema
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "input": items,
+            "text_format": schema
+        }
 
         prev_id = metadata.get("previous_response_id")
         if prev_id:
@@ -478,16 +499,38 @@ class OpenAIProvider(BaseProvider):
             if model_limit is not None:
                 kwargs["max_output_tokens"] = model_limit
 
-        response = self.client.responses.parse(**kwargs)
-        content = response.output_parsed
+        # Stream with text_format - server should enforce schema during generation
+        full_text_parts: List[str] = []
+        with self.client.responses.stream(**kwargs) as stream:
+            for event in stream:
+                if getattr(event, "type", "") == "response.output_text.delta":
+                    delta = getattr(event, "delta", "") or ""
+                    # Optional: push to UI here for live updates
+                    full_text_parts.append(delta)
+
+            final = stream.get_final_response()
+
+        # Get the structured output - should already be parsed if text_format worked
+        # Defensive: fall back across SDK versions that may not populate output_parsed
+        output_parsed = getattr(final, "output_parsed", None)
+        if output_parsed is not None:
+            # SDK returned parsed object (newer versions)
+            content = output_parsed
+        else:
+            # Fallback: parse JSON manually (SDK version safety)
+            output_text = (getattr(final, "output_text", None) or "".join(full_text_parts)).strip()
+            parsed = schema.model_validate_json(output_text)
+            content = parsed
+
         if isinstance(content, BaseModel):
             content = content.model_dump(by_alias=True)
-        tokens = response.usage.total_tokens
+
+        tokens = final.usage.total_tokens
         return content, tokens
         
     @retry_on_rate_limit
     def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
-        """OpenAI native tool calling via Responses API - tool use is required."""
+        """OpenAI native tool calling via Responses API - streaming version."""
         items, metadata = self.convert_messages(messages, tools)
 
         normalized_tools = metadata.get("tools") or []
@@ -531,8 +574,16 @@ class OpenAIProvider(BaseProvider):
             if model_limit is not None:
                 kwargs["max_output_tokens"] = model_limit
 
-        response = self.client.responses.create(**kwargs)
+        # Stream for robustness (avoids 10-minute timeout), then normalize using existing logic
+        with self.client.responses.stream(**kwargs) as stream:
+            # Optional: inspect tool call events as they arrive (safe to remove)
+            # for event in stream:
+            #     if getattr(event, "type", "") == "response.output_text.delta":
+            #         on_delta(event.delta)
+            final = stream.get_final_response()
 
+        # From here, reuse existing normalization logic on the final response
+        response = final
         message_dict: Dict[str, Any] = {
             "role": "assistant",
             "content": None,
