@@ -175,7 +175,7 @@ class BaseProvider:
         """
         raise NotImplementedError
         
-    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
+    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None, tool_choice: str = "required") -> tuple:
         """
         Chat completion with native tool calling
         Returns: (response_message: dict, tokens: int)
@@ -184,6 +184,7 @@ class BaseProvider:
             parallel_tool_calls: For OpenAI - whether to allow parallel tool calls (None = default behavior)
                                     For Claude - converted to disable_parallel_tool_use internally
             deepthink: Enable deep thinking mode for supported models (future functionality)
+            tool_choice: "required" (force tool call) or "auto" (model decides). Default "required".
         Note: AI will always be required to choose at least one tool from the provided tools
         """
         raise NotImplementedError
@@ -284,21 +285,36 @@ class OpenAIProvider(BaseProvider):
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Translate Chat Completions-style payloads to Responses API format.
 
-        Handles message normalization, instruction extraction, tool flattening,
-        and previous response chaining in a single pass (mirroring the Claude
-        provider approach for simplicity).
+        CRITICAL FIX: Only uses the MOST RECENT assistant tool_calls batch
+        for follow-up requests with previous_response_id. This matches the
+        Responses API requirement that previous_response_id must pair with
+        exactly the tool outputs from that specific response.
+        
+        Fixes the "No tool call found for function call output" error caused
+        by sending all historical tool outputs with wrong previous_response_id.
         """
         items: List[Dict[str, Any]] = []
-        function_outputs: List[Dict[str, Any]] = []
         instruction_parts: List[str] = []
-        tool_result_ids: List[str] = []
+        
+        # Track the LAST assistant message with tool_calls
+        latest_assistant_tool_call_ids: List[str] = []
+        all_tool_messages_by_id: Dict[str, Dict[str, Any]] = {}
 
+        # PASS 1: Find the most recent assistant with tool_calls
+        # (iterating forward, last one wins)
+        for message in messages:
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                latest_assistant_tool_call_ids = [
+                    tc.get("id")
+                    for tc in message.get("tool_calls", [])
+                    if tc.get("id")
+                ]
+
+        # PASS 2: Build items and index all tool messages
         for message in messages:
             role = message.get("role")
 
             if role in ("system", "developer"):
-                # Track instruction text for follow-up responses while still
-                # passing the content through to the Responses API payload.
                 content_value = message.get("content")
                 if isinstance(content_value, str) and content_value.strip():
                     instruction_parts.append(content_value.strip())
@@ -310,41 +326,112 @@ class OpenAIProvider(BaseProvider):
                     or message.get("id")
                     or message.get("name")
                 )
-                if call_id:
-                    tool_result_ids.append(call_id)
 
                 output = message.get("content")
                 if not isinstance(output, str):
                     output = json.dumps(output or "")
 
-                function_payload = {
+                # Store tool result by call_id for later batching
+                if call_id:
+                    payload = {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": output,
+                    }
+                    # Only include optional "id" when it matches OpenAI "fc" prefix format
+                    if isinstance(call_id, str) and call_id.startswith("fc"):
+                        payload["id"] = call_id
+                    all_tool_messages_by_id[call_id] = payload
+
+                # Still append to items for full history (non-follow-up case)
+                item_payload = {
                     "type": "function_call_output",
                     "call_id": call_id,
                     "output": output,
                 }
-                items.append(function_payload)
-                function_outputs.append(function_payload)
+                if isinstance(call_id, str) and call_id.startswith("fc"):
+                    item_payload["id"] = call_id
+                items.append(item_payload)
                 continue
 
             if role in ("system", "user", "assistant", "developer"):
-                content = message.get("content", "")
-                content_type = "output_text" if role == "assistant" else "input_text"
-                if isinstance(content, str):
-                    content_payload = {"type": content_type, "text": content}
+                content_value = message.get("content", "")
+                
+                if role == "assistant":
+                    # Handle assistant messages with potential tool_calls
+                    content_items: List[Dict[str, Any]] = []
+                    
+                    # Add text content if present
+                    if isinstance(content_value, str) and content_value.strip():
+                        content_items.append({"type": "output_text", "text": content_value})
+                    elif isinstance(content_value, list):
+                        for segment in content_value:
+                            if isinstance(segment, dict) and segment.get("type") in {"text", "output_text"}:
+                                text = segment.get("text", "")
+                                if text.strip():
+                                    content_items.append({"type": "output_text", "text": text})
+                            elif isinstance(segment, str) and segment.strip():
+                                content_items.append({"type": "output_text", "text": segment})
+                    
+                    # Add tool_calls if present
+                    for tool_call in message.get("tool_calls") or []:
+                        call_id = tool_call.get("id") or tool_call.get("tool_call_id")
+                        function_data = tool_call.get("function", {}) or {}
+                        function_name = function_data.get("name")
+                        arguments = function_data.get("arguments")
+                        
+                        if arguments and not isinstance(arguments, str):
+                            try:
+                                arguments = json.dumps(arguments)
+                            except Exception:
+                                arguments = str(arguments)
+                        
+                        # CRITICAL FIX: Use "function_call" type and "call_id" field per OpenAI Responses API spec
+                        # See: https://docs.newapi.ai/en/api/openai-responses/
+                        content_items.append({
+                            "type": "function_call",  # Changed from "tool_call"
+                            "call_id": call_id,       # Changed from "id"
+                            "name": function_name,
+                            "arguments": arguments or "{}",
+                        })
+                    
+                    # Ensure at least one content item
+                    if not content_items:
+                        content_items.append({"type": "output_text", "text": ""})
+                    
+                    items.append({
+                        "role": role,
+                        "content": content_items,
+                    })
                 else:
-                    content_payload = {
-                        "type": content_type,
-                        "text": json.dumps(content),
-                    }
+                    # Handle system, user, developer messages
+                    content_type = "input_text"
+                    if isinstance(content_value, str):
+                        content_payload = {"type": content_type, "text": content_value}
+                    else:
+                        content_payload = {
+                            "type": content_type,
+                            "text": json.dumps(content_value),
+                        }
 
-                items.append({
-                    "role": role,
-                    "content": [content_payload],
-                })
+                    items.append({
+                        "role": role,
+                        "content": [content_payload],
+                    })
                 continue
 
-            # Ignore any other roles to preserve current caller behavior.
+        # PASS 3: Build follow-up metadata for ONLY the latest batch
+        function_outputs: List[Dict[str, Any]] = []
+        tool_result_ids: List[str] = []
 
+        for call_id in latest_assistant_tool_call_ids:
+            tool_msg = all_tool_messages_by_id.get(call_id)
+            if tool_msg:
+                function_outputs.append(tool_msg)
+                tool_result_ids.append(call_id)
+
+        # Map those call_ids back to response.id
+        # (all should share the same response.id anyway)
         previous_response_id = None
         for call_id in tool_result_ids:
             mapped_id = self._callid_to_responseid.get(call_id)
@@ -352,6 +439,7 @@ class OpenAIProvider(BaseProvider):
                 previous_response_id = mapped_id
                 break
 
+        # Normalize tools
         normalized_tools: Optional[List[Dict[str, Any]]] = None
         if tools:
             normalized_tools = []
@@ -385,7 +473,7 @@ class OpenAIProvider(BaseProvider):
             "previous_response_id": previous_response_id,
             "instructions": "\n\n".join(instruction_parts) if instruction_parts else None,
             "tools": normalized_tools,
-            "function_call_outputs": function_outputs,
+            "function_call_outputs": function_outputs,  # Only latest batch!
         }
 
         return items, metadata
@@ -529,8 +617,12 @@ class OpenAIProvider(BaseProvider):
         return content, tokens
         
     @retry_on_rate_limit
-    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
-        """OpenAI native tool calling via Responses API - streaming version."""
+    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None, tool_choice: str = "required") -> tuple:
+        """OpenAI native tool calling via Responses API - streaming version.
+        
+        Args:
+            tool_choice: "required" (force tool call) or "auto" (model decides). Default "required".
+        """
         items, metadata = self.convert_messages(messages, tools)
 
         normalized_tools = metadata.get("tools") or []
@@ -547,21 +639,27 @@ class OpenAIProvider(BaseProvider):
 
         # For follow-up requests with tool outputs
         if is_follow_up:
-            # Only send the function_call_output items and link to previous response
+            # CRITICAL FIX: MUST include tools in follow-up requests!
+            # Without tools, the model cannot emit native tool_calls and will write JSON text instead
+            # See: https://community.openai.com/t/tool-calls-placed-inside-content/648334
             kwargs["input"] = fn_outputs
             kwargs["previous_response_id"] = prev_id
             instructions = metadata.get("instructions")
             if instructions:
                 kwargs["instructions"] = instructions
-            # Do NOT send tools or tool_choice in follow-up requests
+            # ALWAYS send tools and tool_choice, even in follow-up requests
+            if not normalized_tools:
+                raise ValueError(f"tool_choice='{tool_choice}' but tools list is empty")
+            kwargs["tools"] = normalized_tools
+            kwargs["tool_choice"] = tool_choice  # Use parameter instead of hardcoded "required"
         else:
             # Initial tool request - must have tools
             if not normalized_tools:
-                raise ValueError("tool_choice='required' but tools list is empty")
+                raise ValueError(f"tool_choice='{tool_choice}' but tools list is empty")
             kwargs["tools"] = normalized_tools
-            kwargs["tool_choice"] = "required"
+            kwargs["tool_choice"] = tool_choice  # Use parameter instead of hardcoded "required"
 
-        if parallel_tool_calls is not None and not is_follow_up:
+        if parallel_tool_calls is not None:
             kwargs["parallel_tool_calls"] = parallel_tool_calls
 
         if self._should_include_temperature(model):
@@ -589,11 +687,8 @@ class OpenAIProvider(BaseProvider):
             "content": None,
         }
 
-        text_content = (response.output_text or "").strip()
-        if text_content:
-            message_dict["content"] = text_content
-
         tool_calls_list: List[Dict[str, Any]] = []
+        seen_call_ids = set()  # Track tool call IDs to prevent duplicates
 
         # Normalize Responses API tool calls to the existing format
         for item in getattr(response, "output", []) or []:
@@ -601,6 +696,11 @@ class OpenAIProvider(BaseProvider):
 
             if item_type in {"tool_call", "function_call", "tool_use"}:
                 call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+                # Skip if we've already processed this tool call ID
+                if call_id in seen_call_ids:
+                    continue
+                seen_call_ids.add(call_id)
+                
                 func_name = getattr(item, "name", None) or getattr(item, "tool_name", None)
                 arguments = getattr(item, "arguments", None) or getattr(item, "input", None)
                 if not isinstance(arguments, str):
@@ -622,6 +722,11 @@ class OpenAIProvider(BaseProvider):
                     content_type = getattr(content_item, "type", None)
                     if content_type in {"tool_call", "function_call", "tool_use"}:
                         call_id = getattr(content_item, "tool_call_id", None) or getattr(content_item, "id", None)
+                        # Skip if we've already processed this tool call ID
+                        if call_id in seen_call_ids:
+                            continue
+                        seen_call_ids.add(call_id)
+                        
                         func_name = getattr(content_item, "name", None) or getattr(content_item, "tool_name", None)
                         arguments = getattr(content_item, "arguments", None) or getattr(content_item, "input", None)
                         if not isinstance(arguments, str):
@@ -645,6 +750,14 @@ class OpenAIProvider(BaseProvider):
                                 if message_dict["content"]
                                 else segment
                             )
+
+        # CRITICAL FIX: Only use output_text as content if NO tool calls were found
+        # When tool calls are present, output_text often contains raw JSON which should NOT be saved as message content
+        if not tool_calls_list:
+            text_content = (response.output_text or "").strip()
+            if text_content and not message_dict["content"]:
+                # Only use output_text if we haven't already collected content from message items
+                message_dict["content"] = text_content
 
         # Remember which response produced each call_id for follow-up chaining
         resp_id = response.id
@@ -903,8 +1016,12 @@ class ClaudeProvider(BaseProvider):
         return content, tokens
         
     @retry_on_rate_limit
-    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
-        """Claude native tool calling with streaming - always requires at least one tool to be called"""
+    def chat_completion_with_tools(self, messages: List[Dict], tools: List[Dict], model: str, temperature: float, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None, tool_choice: str = "required") -> tuple:
+        """Claude native tool calling with streaming - always requires at least one tool to be called
+        
+        Args:
+            tool_choice: "required" (force tool call) or "auto" (model decides). Default "required".
+        """
         converted_messages, system_prompt = self.convert_messages(messages)
         
         # Convert OpenAI-format tools to Claude format
@@ -927,8 +1044,13 @@ class ClaudeProvider(BaseProvider):
             "model": model,
             "messages": converted_messages,
             "tools": claude_tools,  # Use converted Claude tools
-            "tool_choice": {"type": "any"}  # Always require the AI to choose at least one tool
         }
+        
+        # Map tool_choice to Claude's format
+        if tool_choice == "required":
+            kwargs["tool_choice"] = {"type": "any"}  # Force at least one tool
+        else:
+            kwargs["tool_choice"] = {"type": "auto"}  # Let model decide
 
         # Only add temperature if model supports it
         if self._should_include_temperature(model):
@@ -1030,8 +1152,8 @@ class ProviderManager:
         provider = self.get_provider(provider_name)
         return provider.chat_completion_with_schema(messages, schema, model_name, temperature, max_tokens, deepthink)
         
-    def chat_completion_with_tools(self, model: str, messages: List[Dict], tools: List[Dict], temperature: float = 0.7, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None) -> tuple:
+    def chat_completion_with_tools(self, model: str, messages: List[Dict], tools: List[Dict], temperature: float = 0.7, max_tokens: Optional[int] = None, parallel_tool_calls: Optional[bool] = None, deepthink: Optional[bool] = None, tool_choice: str = "required") -> tuple:
         """Route tool calling to appropriate provider - always requires at least one tool to be called"""
         provider_name, model_name = self.parse_model_string(model)
         provider = self.get_provider(provider_name)
-        return provider.chat_completion_with_tools(messages, tools, model_name, temperature, max_tokens, parallel_tool_calls, deepthink)
+        return provider.chat_completion_with_tools(messages, tools, model_name, temperature, max_tokens, parallel_tool_calls, deepthink, tool_choice)

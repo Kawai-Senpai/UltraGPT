@@ -152,8 +152,14 @@ class UltraGPT:
             Verbose: Optionally logs detailed steps of the request and response process.
         """
         try:
-            # Apply input truncation before processing
+            # Apply input truncation first (truncation might create orphans)
             messages = self.apply_input_truncation(messages, model, input_truncation)
+            
+            # CRITICAL: Remove orphaned tool results AFTER truncation
+            # Truncation can create orphans by removing assistant tool_call messages
+            # This prevents OpenAI 400 errors: "No tool call found for function call output with call_id"
+            from .history_utils import remove_orphaned_tool_results
+            messages = remove_orphaned_tool_results(messages, verbose=self.verbose)
             
             self.log.debug("Sending request to AI provider (msgs: " + str(len(messages)) + ")")
             if self.verbose:
@@ -225,8 +231,14 @@ class UltraGPT:
         model = model or config.DEFAULT_PARSE_MODEL
         temperature = temperature if temperature is not None else config.DEFAULT_TEMPERATURE
         try:
-            # Apply input truncation before processing
+            # Apply input truncation first (truncation might create orphans)
             messages = self.apply_input_truncation(messages, model, input_truncation)
+            
+            # CRITICAL: Remove orphaned tool results AFTER truncation
+            # Truncation can create orphans by removing assistant tool_call messages
+            # This prevents OpenAI 400 errors: "No tool call found for function call output with call_id"
+            from .history_utils import remove_orphaned_tool_results
+            messages = remove_orphaned_tool_results(messages, verbose=self.verbose)
             
             self.log.debug("Sending parse request with schema: %s", schema)
             
@@ -284,8 +296,14 @@ class UltraGPT:
             deepthink (Optional[bool]): Enable deep thinking mode for supported models.
         """
         try:
-            # Apply input truncation before processing
+            # Apply input truncation first (truncation might create orphans)
             messages = self.apply_input_truncation(messages, model, input_truncation)
+            
+            # CRITICAL: Remove orphaned tool results AFTER truncation
+            # Truncation can create orphans by removing assistant tool_call messages
+            # This prevents OpenAI 400 errors: "No tool call found for function call output with call_id"
+            from .history_utils import remove_orphaned_tool_results
+            messages = remove_orphaned_tool_results(messages, verbose=self.verbose)
             
             self.log.debug("Sending native tool calling request")
             
@@ -321,18 +339,13 @@ class UltraGPT:
                     tool_prompts.append(f"- {name}: {description}")
                 
                 # Add tool usage instructions to the message
+                # IMPORTANT: Keep this simple - do NOT ask model to write JSON or include extra fields
+                # Native tool calling handles the structure automatically
                 tool_instructions = f"""
 Available tools:
 {chr(10).join(tool_prompts)}
 
-IMPORTANT TOOL USAGE GUIDELINES:
-- Every tool call MUST include 'reasoning' parameter: Provide detailed reasoning for why this specific tool was chosen and how it will help solve the user's request
-- Every tool call MUST include 'stop_after_tool_call' parameter: Set to true if the task will be complete after this tool call OR if user input is needed, false if you plan to call more tools afterward
-- Always think step by step and use tools strategically to solve the user's request
-- When using tools, provide meaningful reasoning that explains your decision-making process
-- Use stop_after_tool_call=true when: task is complete, you need user feedback, or the result requires user review
-- Use stop_after_tool_call=false when: you plan to use the tool result for additional tool calls to complete the task
-
+Use these tools when needed to help solve the user's request. Call tools directly - do not write JSON.
 """
                 
                 # Make a copy of messages to avoid modifying the original
