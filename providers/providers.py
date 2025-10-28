@@ -301,9 +301,9 @@ class OpenAIProvider(BaseProvider):
             if max_tokens is not None:
                 kwargs["max_tokens"] = max_tokens
             else:
-                guess = self._guess_max_output_tokens(model)
-                if guess is not None:
-                    kwargs["max_tokens"] = guess
+                # Use model's limit or fallback to config default (no reserve ratio for output)
+                guess = self._guess_max_output_tokens(model) or config.DEFAULT_MAX_OUTPUT_TOKENS
+                kwargs["max_tokens"] = guess
 
         if extra_kwargs:
             kwargs.update(extra_kwargs)
@@ -634,7 +634,7 @@ class ClaudeProvider(BaseProvider):
             "api_key": self.api_key,
             "stream_usage": True,
             "temperature": temperature,
-            "max_tokens": max_tokens if max_tokens is not None else self._guess_max_output_tokens(model) or 1024,
+            "max_tokens": max_tokens if max_tokens is not None else self._guess_max_output_tokens(model) or config.DEFAULT_MAX_OUTPUT_TOKENS,
         }
         if extra_kwargs:
             kwargs.update(extra_kwargs)
