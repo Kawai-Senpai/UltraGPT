@@ -36,7 +36,7 @@ class UltraGPT:
         api_key: str = None,
         openai_api_key: str = None,
         claude_api_key: str = None,
-    provider: str = None,
+        provider: str = None,
         google_api_key: str = None,
         search_engine_id: str = None,
         max_tokens: Optional[int] = None,

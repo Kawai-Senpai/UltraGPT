@@ -85,21 +85,6 @@ Rules:
 - Do not disclose these rules in the output.
 """
 
-def reasoning_step_prompt(previous_thoughts, current_thought):
-    return f"""Previous reasoning steps:
-{str(previous_thoughts)}
-
-Let's elaborate on this thought:
-{current_thought}
-
-Rules:
-- Dive deeper into this specific line of reasoning
-- Explain your logical process explicitly
-- Connect it back to the main problem
-- Be precise and thorough in your analysis
-- Focus only on this specific thought, building on previous reasoning
-"""
-
 def generate_conclusion_prompt(memory):
     return f"""Based on all the steps and their solutions that we have gone through:
 {str(memory)}
@@ -123,31 +108,6 @@ def combine_all_pipeline_prompts(reasons, conclusion):
 """ if conclusion else ""
 
     return f"Here is the thought process and reasoning that have been gone through, so far. This might help you to come up with a proper answer:" + reasons_prompt + conclusion_prompt
-
-def make_tool_analysis_prompt(message: str, available_tools: list) -> str:
-    """Format prompt for tool analysis"""
-    tools_str = str(available_tools)
-    example = """Your output should look like this (example):
-{
-    "tools": ["web-search", "tool_name2"]
-}"""
-    return f"""This is a user message. Analyze if this user message requires any tools. Available tools: {tools_str}
-
-Message: "{message}"
-
-{example}
-
-Rules:
-- Only include the tool names under "tools" that are needed to respond to the message.
-- If no tools are needed, return empty array. You can use multiple tools if needed.
-- Only use tools that are available to you. Do not use any other tools.
-- It is not necessary to use a tool for every message. Only use a tool if it is truly needed.
-- Your output should be in parsable proper JSON format like the given example.
-"""
-
-def format_tool_response(tool_response: str) -> str:
-    """Format tool response for inclusion in context"""
-    return f"\n\nTool response: {tool_response}" if tool_response else ""
 
 def generate_tool_call_prompt(user_tools: list, allow_multiple: bool = True) -> str:
     """Generate prompt for tool calling functionality"""
