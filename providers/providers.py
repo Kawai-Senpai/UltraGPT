@@ -28,7 +28,7 @@ from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 
 from .. import config
-from ..schemas import prepare_schema_for_openai
+from ..schemas import prepare_schema_for_openai, sanitize_tool_parameters_schema
 from ..messaging import (
     LangChainTokenLimiter,
     ensure_langchain_messages,
@@ -497,20 +497,31 @@ class OpenAIProvider(BaseProvider):
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
         
         # Normalize tool format: ensure tools[0].function exists (OpenAI format)
+        # Also sanitize parameter schemas to avoid OpenAI 400 errors
         normalized_tools = []
         for tool in tools or []:
             if isinstance(tool, dict):
                 if "function" in tool:
-                    # Already in correct format
-                    normalized_tools.append(tool)
+                    # Already in correct format - sanitize parameters
+                    fn = tool["function"]
+                    cleaned_params = sanitize_tool_parameters_schema(fn.get("parameters", {}) or {})
+                    normalized_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": fn["name"],
+                            "description": fn.get("description", ""),
+                            "parameters": cleaned_params,
+                        }
+                    })
                 elif "name" in tool and "type" in tool:
-                    # Old format: convert to new format
+                    # Old format: convert to new format and sanitize
+                    cleaned_params = sanitize_tool_parameters_schema(tool.get("parameters", {}) or {})
                     normalized_tools.append({
                         "type": tool.get("type", "function"),
                         "function": {
                             "name": tool["name"],
                             "description": tool.get("description", ""),
-                            "parameters": tool.get("parameters", {}),
+                            "parameters": cleaned_params,
                         }
                     })
                 else:
@@ -791,13 +802,37 @@ class ClaudeProvider(BaseProvider):
         tool_choice: str = "required",
     ) -> Tuple[Dict[str, Any], int]:
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
-        # Pass raw JSON tool dicts directly; no Pydantic conversion
+        
+        # Sanitize tool parameter schemas to avoid validation errors
+        # Claude doesn't have the same strict requirements as OpenAI, but cleaning doesn't hurt
+        sanitized_tools = []
+        for tool in tools or []:
+            if isinstance(tool, dict):
+                if "function" in tool:
+                    fn = tool["function"]
+                    cleaned_params = sanitize_tool_parameters_schema(fn.get("parameters", {}) or {})
+                    sanitized_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": fn["name"],
+                            "description": fn.get("description", ""),
+                            "parameters": cleaned_params,
+                        }
+                    })
+                else:
+                    # Assume direct tool dict format
+                    cleaned_params = sanitize_tool_parameters_schema(tool.get("parameters", {}) or {})
+                    tool_copy = tool.copy()
+                    tool_copy["parameters"] = cleaned_params
+                    sanitized_tools.append(tool_copy)
+            else:
+                sanitized_tools.append(tool)
         
         # Map "required" to "any" for Claude (Anthropic uses "any")
         claude_tool_choice = "any" if tool_choice == "required" else tool_choice
         
         bound_llm = llm.bind_tools(
-            tools,
+            sanitized_tools,
             tool_choice=claude_tool_choice,
             parallel_tool_calls=parallel_tool_calls,
         )

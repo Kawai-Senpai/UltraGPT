@@ -4,6 +4,7 @@ from .schema_utils import (
     ensure_openai_strict_compliance,
     normalize_pydantic_optional_fields,
     prepare_schema_for_openai,
+    sanitize_tool_parameters_schema,
 )
 from .tool_schemas import (
     ExpertTool,
@@ -22,6 +23,7 @@ __all__ = [
     "normalize_pydantic_optional_fields",
     "ensure_openai_strict_compliance",
     "prepare_schema_for_openai",
+    "sanitize_tool_parameters_schema",
     # Tool schemas
     "ExpertTool",
     "FunctionCall",
