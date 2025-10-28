@@ -202,7 +202,9 @@ class UltraGPT:
         tools_config = tools_config or {}
 
         validated_tools = self.tool_manager.validate_user_tools(user_tools)
-        instruction_prompt = self._build_tool_instruction_prompt(validated_tools)
+        # Use rich tool prompt with allow_multiple based on parallel_tool_calls
+        allow_multiple = parallel_tool_calls if parallel_tool_calls is not None else True
+        instruction_prompt = self._build_tool_instruction_prompt(validated_tools, allow_multiple)
         prepared_messages = integrate_tool_call_prompt(messages, instruction_prompt) if instruction_prompt else messages
 
         return self.chat_flow.chat_with_model_tools(
@@ -218,24 +220,24 @@ class UltraGPT:
             deepthink=deepthink,
         )
 
-    def _build_tool_instruction_prompt(self, tools: List[Dict[str, Any]]) -> Optional[str]:
+    def _build_tool_instruction_prompt(self, tools: List[Dict[str, Any]], allow_multiple: bool = True) -> Optional[str]:
         if not tools:
             return None
 
-        bullet_lines = [f"- {tool.get('name', 'unknown')}: {tool.get('description', 'No description')}" for tool in tools]
-        bullet_block = "\n".join(bullet_lines)
-
-        instructions = (
-            "Available tools:\n"
-            f"{bullet_block}\n\n"
-            "IMPORTANT TOOL USAGE GUIDELINES:\n"
+        # Use the rich prompt from prompts.py
+        base_prompt = generate_multiple_tool_call_prompt(tools) if allow_multiple else generate_single_tool_call_prompt(tools)
+        
+        # Append IMPORTANT TOOL USAGE GUIDELINES
+        guidelines = (
+            "\n\nIMPORTANT TOOL USAGE GUIDELINES:\n"
             "- Every tool call MUST include 'reasoning': explain to the user why this tool helps their request.\n"
             "- Every tool call MUST include 'stop_after_tool_call': true when the task is done or user input is needed, false when you plan additional tool calls.\n"
             "- Think step by step and combine tools strategically.\n"
             "- Stop after tool execution when a review is required or the task is complete.\n"
             "- Continue with more tools only when further automated steps are necessary."
         )
-        return instructions
+        
+        return base_prompt + guidelines
 
     # ------------------------------------------------------------------
     # Pipelines
