@@ -28,6 +28,7 @@ from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 
 from .. import config
+from ..schemas import prepare_schema_for_openai
 from ..messaging import (
     LangChainTokenLimiter,
     ensure_langchain_messages,
@@ -467,9 +468,14 @@ class OpenAIProvider(BaseProvider):
         deepthink: Optional[bool] = None,
     ) -> Tuple[Dict[str, Any], int]:
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
+        
+        # Prepare schema for OpenAI strict mode compliance
+        schema_dict = prepare_schema_for_openai(schema.model_json_schema())
+        
         structured_llm = llm.with_structured_output(
-            schema,
+            schema_dict,
             include_raw=True,
+            method="json_schema",
         )
         stream = structured_llm.stream(messages)
         final_obj = self._accumulate_structured_stream(stream)
@@ -833,9 +839,14 @@ class ClaudeProvider(BaseProvider):
         deepthink: Optional[bool] = None,
     ) -> Tuple[Dict[str, Any], int]:
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
+        
+        # Prepare schema for strict mode compliance (Claude also benefits from clean schemas)
+        schema_dict = prepare_schema_for_openai(schema.model_json_schema())
+        
         structured_llm = llm.with_structured_output(
-            schema,
+            schema_dict,
             include_raw=True,
+            method="json_schema",
         )
         stream = structured_llm.stream(messages)
         final_obj = self._accumulate_structured_stream(stream)

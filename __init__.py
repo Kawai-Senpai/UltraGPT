@@ -14,10 +14,6 @@ from .messaging import (
     validate_tool_call_pairing_lc,
 )
 from .prompts import (
-    ExpertTool,
-    Reasoning,
-    Steps,
-    UserTool,
     combine_all_pipeline_prompts,
     each_step_prompt,
     generate_conclusion_prompt,
@@ -26,6 +22,15 @@ from .prompts import (
     generate_single_tool_call_prompt,
     generate_steps_prompt,
     generate_tool_call_prompt,
+)
+from .schemas import (
+    ExpertTool,
+    Reasoning,
+    Steps,
+    UserTool,
+    ensure_openai_strict_compliance,
+    normalize_pydantic_optional_fields,
+    prepare_schema_for_openai,
 )
 from .providers import (
     BaseProvider,
@@ -74,4 +79,8 @@ __all__ = [
     "Steps",
     "UserTool",
     "ExpertTool",
+    # Schema utilities
+    "normalize_pydantic_optional_fields",
+    "ensure_openai_strict_compliance",
+    "prepare_schema_for_openai",
 ]

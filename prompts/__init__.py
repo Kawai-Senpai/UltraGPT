@@ -1,4 +1,4 @@
-"""Prompt builders and schemas for UltraGPT."""
+"""Prompt builders for UltraGPT."""
 
 from .prompts import (
     combine_all_pipeline_prompts,
@@ -10,7 +10,9 @@ from .prompts import (
     generate_steps_prompt,
     generate_tool_call_prompt,
 )
-from .schemas import ExpertTool, Reasoning, Steps, UserTool
+
+# Import schemas from their new location for backward compatibility
+from ..schemas import ExpertTool, Reasoning, Steps, UserTool
 
 __all__ = [
     "combine_all_pipeline_prompts",

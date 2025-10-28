@@ -20,6 +20,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from pydantic import BaseModel
 
 from .. import config
+from ..schemas import normalize_pydantic_optional_fields, ensure_openai_strict_compliance
 
 class ToolManager:
     """
@@ -42,45 +43,7 @@ class ToolManager:
         self.google_api_key = ultragpt_instance.google_api_key
         self.search_engine_id = ultragpt_instance.search_engine_id
 
-    @staticmethod
-    def normalize_pydantic_optional_fields(schema):
-        """
-        Fix Pydantic v2's Optional field schemas that use anyOf with [type, null].
-        OpenAI requires every property to have a 'type' key directly.
-        
-        Pydantic v2 generates: {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "..."}
-        OpenAI expects: {"type": "string", "description": "..."}
-        
-        This function modifies the schema in-place and also returns it for convenience.
-        """
-        if isinstance(schema, dict):
-            # Check if this is an Optional field with anyOf pattern
-            if "anyOf" in schema and "type" not in schema:
-                any_of = schema["anyOf"]
-                # Look for pattern: [{"type": "<some_type>"}, {"type": "null"}]
-                if isinstance(any_of, list) and len(any_of) == 2:
-                    type_schemas = [item for item in any_of if isinstance(item, dict) and item.get("type") != "null"]
-                    if len(type_schemas) == 1:
-                        # Extract the actual type schema (not null)
-                        actual_type_schema = type_schemas[0]
-                        # Remove anyOf and merge the actual type
-                        schema.pop("anyOf")
-                        schema.update(actual_type_schema)
-                        # Keep other fields like description, default, title
-            
-            # Recursively process nested schemas
-            for key, value in list(schema.items()):
-                if key == "properties" and isinstance(value, dict):
-                    for prop_key, prop_value in value.items():
-                        ToolManager.normalize_pydantic_optional_fields(prop_value)
-                elif isinstance(value, dict):
-                    ToolManager.normalize_pydantic_optional_fields(value)
-                elif isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, dict):
-                            ToolManager.normalize_pydantic_optional_fields(item)
-        
-        return schema
+
 
     def load_internal_tools(self, tools: list) -> dict:
         """Dynamically load internal tool configurations from tool directories"""
@@ -122,7 +85,7 @@ class ToolManager:
                 schema_dict = schema_class.model_json_schema()
                 
                 # Normalize Optional fields for OpenAI compatibility
-                self.normalize_pydantic_optional_fields(schema_dict)
+                normalize_pydantic_optional_fields(schema_dict)
                 
                 loaded_tools[tool_name_normalized] = {  # Use normalized name as key
                     'name': tool_name_normalized,
@@ -430,7 +393,7 @@ class ToolManager:
             parameters_schema = tool_dict["parameters_schema"].copy()
             
             # Normalize Pydantic v2 Optional field schemas to OpenAI-compatible format
-            self.normalize_pydantic_optional_fields(parameters_schema)
+            normalize_pydantic_optional_fields(parameters_schema)
             
             # Surgically add reasoning and stop_after_tool_call parameters to the schema
             if "properties" not in parameters_schema:
@@ -449,25 +412,6 @@ class ToolManager:
             }
             
             # Ensure additionalProperties is false and required includes all properties for OpenAI strict mode
-            def ensure_openai_strict_compliance(schema):
-                if isinstance(schema, dict):
-                    if schema.get("type") == "object":
-                        schema["additionalProperties"] = False
-                        # For OpenAI strict mode, required must include ALL properties if any are specified
-                        if "properties" in schema:
-                            all_properties = list(schema["properties"].keys())
-                            schema["required"] = all_properties
-                    
-                    for key, value in schema.items():
-                        if key == "properties" and isinstance(value, dict):
-                            for prop_value in value.values():
-                                ensure_openai_strict_compliance(prop_value)
-                        elif isinstance(value, dict):
-                            ensure_openai_strict_compliance(value)
-                        elif isinstance(value, list):
-                            for item in value:
-                                ensure_openai_strict_compliance(item)
-            
             ensure_openai_strict_compliance(parameters_schema)
             
             # Convert to OpenAI function calling format (Claude will handle conversion)
