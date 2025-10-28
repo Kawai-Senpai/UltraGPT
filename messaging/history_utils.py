@@ -100,9 +100,50 @@ def filter_messages_safe_lc(messages: List[BaseMessage], filter_func: Callable[[
     filtered = [message for message in messages if filter_func(message)]
     return remove_orphaned_tool_results_lc(filtered, verbose=verbose)
 
+
+def drop_unresolved_tool_calls_lc(messages: List[BaseMessage], verbose: bool = False) -> List[BaseMessage]:
+    """Remove assistant messages that contain tool_calls without matching tool outputs.
+
+    OpenAI Responses API will reject inputs that include an assistant tool call
+    without a corresponding tool output message. This sanitizer drops any
+    assistant messages whose tool_calls reference call ids that have not yet
+    been answered by a ToolMessage in the history.
+    """
+
+    if not messages:
+        return messages
+
+    diag = validate_tool_call_pairing_lc(messages)
+    missing_ids = set(diag.get("missing_tool_results", []) or [])
+    if not missing_ids:
+        return messages
+
+    cleaned: List[BaseMessage] = []
+    dropped = 0
+    for message in messages:
+        if isinstance(message, AIMessage):
+            has_missing = False
+            for call in getattr(message, "tool_calls", []) or []:
+                call_id = call.get("id")
+                if call_id and call_id in missing_ids:
+                    has_missing = True
+                    break
+            if has_missing:
+                dropped += 1
+                if verbose:
+                    log.warning("Dropping assistant message with unresolved tool_calls: %s", message)
+                continue
+        cleaned.append(message)
+
+    if dropped and verbose:
+        log.info("Dropped %d assistant messages with unresolved tool_calls", dropped)
+
+    return cleaned
+
 __all__ = [
     "remove_orphaned_tool_results_lc",
     "validate_tool_call_pairing_lc",
     "concat_messages_safe_lc",
     "filter_messages_safe_lc",
+    "drop_unresolved_tool_calls_lc",
 ]
