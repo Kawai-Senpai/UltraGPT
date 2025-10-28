@@ -1,4 +1,14 @@
-"""LangChain-powered provider abstraction for UltraGPT."""
+"""LangChain powered provider abstraction for UltraGPT.
+
+This module wraps ChatOpenAI and ChatAnthropic and exposes a stable interface
+that matches what callers already use:
+    - chat_completion
+    - chat_completion_with_schema
+    - chat_completion_with_tools
+
+All three paths stream results so long responses do not block. Structured
+output also streams and still returns parsed JSON plus usage metadata.
+"""
 
 from __future__ import annotations
 
@@ -12,10 +22,10 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from langchain_anthropic import ChatAnthropic
+from pydantic import BaseModel, Field, create_model
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field, create_model
+from langchain_anthropic import ChatAnthropic
 
 from .. import config
 from ..messaging import (
@@ -284,7 +294,7 @@ class OpenAIProvider(BaseProvider):
             "api_key": self.api_key,
             "use_responses_api": True,
             "output_version": "responses/v1",
-            "stream_options": {"include_usage": True},
+            "stream_usage": True,
         }
 
         if self._should_include_temperature(model):
@@ -313,6 +323,7 @@ class OpenAIProvider(BaseProvider):
 
     @staticmethod
     def _accumulate_stream(stream_iter) -> AIMessageChunk:
+        """Merge AIMessageChunk pieces yielded by llm.stream."""
         first: Optional[AIMessageChunk] = None
         try:
             first = next(stream_iter)
@@ -324,8 +335,36 @@ class OpenAIProvider(BaseProvider):
         return aggregate
 
     @staticmethod
-    def _usage_total_tokens_from_chunk(chunk: AIMessageChunk) -> int:
-        usage_meta = getattr(chunk, "usage_metadata", None)
+    def _accumulate_structured_stream(stream_iter) -> Any:
+        """Collect and merge all chunks from structured_llm.stream.
+        
+        With include_raw=True, the stream yields multiple dicts with single keys:
+        First chunk: {"raw": AIMessage}
+        Second chunk: {"parsed": data}
+        Third chunk: {"parsing_error": err}
+        We need to merge all chunks into a single result dict.
+        """
+        result: Dict[str, Any] = {}
+        for item in stream_iter:
+            # Debug logging to see what's being streamed
+            if isinstance(item, dict):
+                logger.debug(f"Structured stream chunk keys: {list(item.keys())}")
+                result.update(item)  # Merge all chunks
+                if "parsed" in item:
+                    logger.debug(f"Parsed data type: {type(item.get('parsed'))}")
+                if "raw" in item:
+                    raw_msg = item.get("raw")
+                    usage = getattr(raw_msg, "usage_metadata", None)
+                    logger.debug(f"Raw message usage_metadata: {usage}")
+        return result if result else None
+
+    @staticmethod
+    def _usage_total_tokens_from_message(msg: Union[AIMessage, AIMessageChunk, None]) -> int:
+        """Extract total token usage from a streamed AIMessage or chunk."""
+        if msg is None:
+            return 0
+
+        usage_meta = getattr(msg, "usage_metadata", None)
         if isinstance(usage_meta, dict):
             total = usage_meta.get("total_tokens")
             if total is not None:
@@ -340,24 +379,57 @@ class OpenAIProvider(BaseProvider):
             except Exception:  # noqa: BLE001
                 return 0
 
-        response_meta = getattr(chunk, "response_metadata", None)
+        response_meta = getattr(msg, "response_metadata", None)
         if isinstance(response_meta, dict):
-            token_usage = response_meta.get("token_usage", {})
-            if isinstance(token_usage, dict):
-                total = token_usage.get("total_tokens")
-                if total is not None:
-                    try:
-                        return int(total)
-                    except Exception:  # noqa: BLE001
-                        return 0
-                prompt_tokens = token_usage.get("prompt_tokens", 0)
-                completion_tokens = token_usage.get("completion_tokens", 0)
+            token_usage = response_meta.get("token_usage", {}) or {}
+            total = token_usage.get("total_tokens")
+            if total is not None:
                 try:
-                    return int(prompt_tokens) + int(completion_tokens)
+                    return int(total)
                 except Exception:  # noqa: BLE001
                     return 0
+            prompt_tokens = token_usage.get("prompt_tokens", 0)
+            completion_tokens = token_usage.get("completion_tokens", 0)
+            try:
+                return int(prompt_tokens) + int(completion_tokens)
+            except Exception:  # noqa: BLE001
+                return 0
 
         return 0
+
+    def _finalize_structured_result(self, final_obj: Any) -> Tuple[Dict[str, Any], int]:
+        """Normalize structured stream output into parsed dict and usage."""
+        if isinstance(final_obj, dict) and "parsed" in final_obj:
+            parsed_part = final_obj.get("parsed")
+            raw_msg = final_obj.get("raw")
+            tokens_used = self._usage_total_tokens_from_message(raw_msg)
+
+            if isinstance(parsed_part, BaseModel):
+                parsed_dict = parsed_part.model_dump(by_alias=True)
+            elif isinstance(parsed_part, dict):
+                parsed_dict = parsed_part
+            else:
+                try:
+                    parsed_dict = json.loads(str(parsed_part))
+                except Exception:  # noqa: BLE001
+                    parsed_dict = {"result": str(parsed_part)}
+
+            return parsed_dict, tokens_used
+
+        tokens_used = 0
+        if isinstance(final_obj, BaseModel):
+            return final_obj.model_dump(by_alias=True), tokens_used
+        if isinstance(final_obj, dict):
+            return final_obj, tokens_used
+
+        try:
+            parsed_attempt = json.loads(str(final_obj))
+            if isinstance(parsed_attempt, dict):
+                return parsed_attempt, tokens_used
+        except Exception:  # noqa: BLE001
+            pass
+
+        return {"result": str(final_obj)}, tokens_used
 
     @retry_on_rate_limit
     def chat_completion(
@@ -372,7 +444,19 @@ class OpenAIProvider(BaseProvider):
         stream = llm.stream(messages)
         final_chunk = self._accumulate_stream(stream)
         content = getattr(final_chunk, "content", "") or ""
-        tokens_used = self._usage_total_tokens_from_chunk(final_chunk)
+        
+        # Handle cases where content is a list (structured content)
+        if isinstance(content, list):
+            # Extract text from structured content
+            text_parts = []
+            for item in content:
+                if isinstance(item, dict) and "text" in item:
+                    text_parts.append(item["text"])
+                elif isinstance(item, str):
+                    text_parts.append(item)
+            content = " ".join(text_parts)
+        
+        tokens_used = self._usage_total_tokens_from_message(final_chunk)
         return content.strip(), tokens_used
 
     @retry_on_rate_limit
@@ -386,18 +470,14 @@ class OpenAIProvider(BaseProvider):
         deepthink: Optional[bool] = None,
     ) -> Tuple[Dict[str, Any], int]:
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
-        structured_llm = llm.with_structured_output(schema)
-        structured_resp = structured_llm.invoke(messages)
-        if isinstance(structured_resp, BaseModel):
-            parsed = structured_resp.model_dump(by_alias=True)
-        elif isinstance(structured_resp, dict):
-            parsed = structured_resp
-        else:
-            try:
-                parsed = json.loads(str(structured_resp))
-            except Exception:  # noqa: BLE001
-                parsed = {"result": str(structured_resp)}
-        return parsed, 0
+        structured_llm = llm.with_structured_output(
+            schema,
+            include_raw=True,
+        )
+        stream = structured_llm.stream(messages)
+        final_obj = self._accumulate_structured_stream(stream)
+        parsed_dict, tokens_used = self._finalize_structured_result(final_obj)
+        return parsed_dict, tokens_used
 
     @staticmethod
     def _json_schema_type_to_pytype(prop_schema: Dict[str, Any]) -> Any:
@@ -468,7 +548,7 @@ class OpenAIProvider(BaseProvider):
 
         invoke_kwargs: Dict[str, Any] = {}
         if tool_choice == "required":
-            invoke_kwargs["tool_choice"] = "any"
+            invoke_kwargs["tool_choice"] = "required"  # OpenAI changed from "any" to "required"
         elif tool_choice != "auto":
             invoke_kwargs["tool_choice"] = tool_choice
 
@@ -477,7 +557,7 @@ class OpenAIProvider(BaseProvider):
 
         stream = llm_with_tools.stream(messages, **invoke_kwargs)
         final_chunk = self._accumulate_stream(stream)
-        tokens_used = self._usage_total_tokens_from_chunk(final_chunk)
+        tokens_used = self._usage_total_tokens_from_message(final_chunk)
 
         content = getattr(final_chunk, "content", None)
         normalized_calls: List[Dict[str, Any]] = []
@@ -511,7 +591,11 @@ class OpenAIProvider(BaseProvider):
 
 
 class ClaudeProvider(BaseProvider):
-    """Anthropic Claude provider implemented via LangChain ChatAnthropic."""
+    """Anthropic Claude provider through LangChain ChatAnthropic.
+
+    Streaming is enabled for chat, structured, and tool calls so long outputs
+    do not block and token usage metadata is always available.
+    """
 
     LIMITS = {
         "claude-opus-4-1": {"max_input_tokens": 200000, "max_output_tokens": 32000},
@@ -569,6 +653,7 @@ class ClaudeProvider(BaseProvider):
 
     @staticmethod
     def _accumulate_stream(stream_iter) -> AIMessageChunk:
+        """Merge AIMessageChunk pieces yielded by llm.stream."""
         first: Optional[AIMessageChunk] = None
         try:
             first = next(stream_iter)
@@ -580,23 +665,88 @@ class ClaudeProvider(BaseProvider):
         return aggregate
 
     @staticmethod
-    def _usage_total_tokens_from_chunk(chunk: AIMessageChunk) -> int:
-        usage_meta = getattr(chunk, "usage_metadata", None)
+    def _accumulate_structured_stream(stream_iter) -> Any:
+        """Collect and merge all chunks from structured_llm.stream.
+        
+        With include_raw=True, the stream yields multiple dicts with single keys:
+        First chunk: {"raw": AIMessage}
+        Second chunk: {"parsed": data}
+        Third chunk: {"parsing_error": err}
+        We need to merge all chunks into a single result dict.
+        """
+        result: Dict[str, Any] = {}
+        for item in stream_iter:
+            # Debug logging to see what's being streamed
+            if isinstance(item, dict):
+                logger.debug(f"Claude structured stream chunk keys: {list(item.keys())}")
+                result.update(item)  # Merge all chunks
+                if "parsed" in item:
+                    logger.debug(f"Claude parsed data type: {type(item.get('parsed'))}")
+                if "raw" in item:
+                    raw_msg = item.get("raw")
+                    usage = getattr(raw_msg, "usage_metadata", None)
+                    logger.debug(f"Claude raw message usage_metadata: {usage}")
+        return result if result else None
+
+    @staticmethod
+    def _usage_total_tokens_from_message(msg: Union[AIMessage, AIMessageChunk, None]) -> int:
+        """Extract total token usage from a Claude AIMessage or chunk."""
+        if msg is None:
+            return 0
+
+        usage_meta = getattr(msg, "usage_metadata", None)
         if isinstance(usage_meta, dict):
             try:
-                return int(usage_meta.get("input_tokens", 0)) + int(usage_meta.get("output_tokens", 0))
+                return int(usage_meta.get("input_tokens", 0)) + int(
+                    usage_meta.get("output_tokens", 0)
+                )
             except Exception:  # noqa: BLE001
                 return 0
 
-        response_meta = getattr(chunk, "response_metadata", None)
+        response_meta = getattr(msg, "response_metadata", None)
         if isinstance(response_meta, dict):
-            usage = response_meta.get("usage", {})
-            if isinstance(usage, dict):
-                try:
-                    return int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
-                except Exception:  # noqa: BLE001
-                    return 0
+            usage = response_meta.get("usage", {}) or {}
+            try:
+                return int(usage.get("input_tokens", 0)) + int(
+                    usage.get("output_tokens", 0)
+                )
+            except Exception:  # noqa: BLE001
+                return 0
         return 0
+
+    def _finalize_structured_result(self, final_obj: Any) -> Tuple[Dict[str, Any], int]:
+        """Normalize structured stream output into parsed dict and usage."""
+        if isinstance(final_obj, dict) and "parsed" in final_obj:
+            parsed_part = final_obj.get("parsed")
+            raw_msg = final_obj.get("raw")
+            tokens_used = self._usage_total_tokens_from_message(raw_msg)
+
+            if isinstance(parsed_part, BaseModel):
+                parsed_dict = parsed_part.model_dump(by_alias=True)
+            elif isinstance(parsed_part, dict):
+                parsed_dict = parsed_part
+            else:
+                try:
+                    parsed_dict = json.loads(str(parsed_part))
+                except Exception:  # noqa: BLE001
+                    parsed_dict = {"result": str(parsed_part)}
+
+            return parsed_dict, tokens_used
+
+        tokens_used = 0
+        if isinstance(final_obj, BaseModel):
+            return final_obj.model_dump(by_alias=True), tokens_used
+        if isinstance(final_obj, dict):
+            return final_obj, tokens_used
+
+        try:
+            parsed_attempt = json.loads(str(final_obj))
+            if isinstance(parsed_attempt, dict):
+                return parsed_attempt, tokens_used
+        except Exception:  # noqa: BLE001
+            pass
+
+        return {"result": str(final_obj)}, tokens_used
 
     def _json_schema_type_to_pytype(self, prop_schema: Dict[str, Any]) -> Any:
         schema_type = prop_schema.get("type")
@@ -660,7 +810,19 @@ class ClaudeProvider(BaseProvider):
         stream = llm.stream(messages)
         final_chunk = self._accumulate_stream(stream)
         content = getattr(final_chunk, "content", "") or ""
-        tokens_used = self._usage_total_tokens_from_chunk(final_chunk)
+        
+        # Handle cases where content is a list (structured content)
+        if isinstance(content, list):
+            # Extract text from structured content
+            text_parts = []
+            for item in content:
+                if isinstance(item, dict) and "text" in item:
+                    text_parts.append(item["text"])
+                elif isinstance(item, str):
+                    text_parts.append(item)
+            content = " ".join(text_parts)
+        
+        tokens_used = self._usage_total_tokens_from_message(final_chunk)
         return content.strip(), tokens_used
 
     @retry_on_rate_limit
@@ -674,18 +836,14 @@ class ClaudeProvider(BaseProvider):
         deepthink: Optional[bool] = None,
     ) -> Tuple[Dict[str, Any], int]:
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
-        structured_llm = llm.with_structured_output(schema)
-        structured_resp = structured_llm.invoke(messages)
-        if isinstance(structured_resp, BaseModel):
-            parsed = structured_resp.model_dump(by_alias=True)
-        elif isinstance(structured_resp, dict):
-            parsed = structured_resp
-        else:
-            try:
-                parsed = json.loads(str(structured_resp))
-            except Exception:  # noqa: BLE001
-                parsed = {"result": str(structured_resp)}
-        return parsed, 0
+        structured_llm = llm.with_structured_output(
+            schema,
+            include_raw=True,
+        )
+        stream = structured_llm.stream(messages)
+        final_obj = self._accumulate_structured_stream(stream)
+        parsed_dict, tokens_used = self._finalize_structured_result(final_obj)
+        return parsed_dict, tokens_used
 
     @retry_on_rate_limit
     def chat_completion_with_tools(
@@ -700,11 +858,19 @@ class ClaudeProvider(BaseProvider):
         tool_choice: str = "required",
     ) -> Tuple[Dict[str, Any], int]:
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
-        pydantic_tools, strict_any = self._build_pydantic_tools_from_specs(tools)
-        llm_with_tools = llm.bind_tools(pydantic_tools, strict=strict_any)
-        stream = llm_with_tools.stream(messages)
+        pydantic_tools, _strict_any = self._build_pydantic_tools_from_specs(tools)
+        
+        # Map "required" to "any" for Claude (Anthropic uses "any")
+        claude_tool_choice = "any" if tool_choice == "required" else tool_choice
+        
+        bound_llm = llm.bind_tools(
+            pydantic_tools,
+            tool_choice=claude_tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+        )
+        stream = bound_llm.stream(messages)
         final_chunk = self._accumulate_stream(stream)
-        tokens_used = self._usage_total_tokens_from_chunk(final_chunk)
+        tokens_used = self._usage_total_tokens_from_message(final_chunk)
 
         content = getattr(final_chunk, "content", None)
         normalized_calls: List[Dict[str, Any]] = []
@@ -825,7 +991,7 @@ class ProviderManager:
         except Exception as exc:  # noqa: BLE001
             if self._log:
                 self._log.error(
-                    "Input truncation failed for %s:%s — %s",
+                    "Input truncation failed for %s:%s - %s",
                     provider_name,
                     model_name,
                     exc,

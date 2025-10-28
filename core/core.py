@@ -36,6 +36,7 @@ class UltraGPT:
         api_key: str = None,
         openai_api_key: str = None,
         claude_api_key: str = None,
+    provider: str = None,
         google_api_key: str = None,
         search_engine_id: str = None,
         max_tokens: Optional[int] = None,
@@ -48,6 +49,21 @@ class UltraGPT:
         log_to_console: bool = False,
         log_level: str = "DEBUG",
     ) -> None:
+        if openai_api_key and api_key and openai_api_key != api_key:
+            raise ValueError("Provide either api_key or openai_api_key, not both")
+
+        # Backwards compatibility: some callers used provider="openai"/"anthropic"
+        if provider and provider not in {"openai", "anthropic", "claude"}:
+            raise ValueError("provider must be 'openai' or 'anthropic'")
+
+        primary_api_key = openai_api_key or api_key
+
+        # If provider is explicitly set, only enable that provider
+        if provider == "openai":
+            claude_api_key = None
+        elif provider in {"anthropic", "claude"}:
+            primary_api_key = None
+
         self.verbose = verbose
         self.google_api_key = google_api_key
         self.search_engine_id = search_engine_id
@@ -77,8 +93,8 @@ class UltraGPT:
             verbose=self.verbose,
         )
 
-        if api_key or openai_api_key:
-            openai_provider = OpenAIProvider(api_key=api_key or openai_api_key)
+        if primary_api_key:
+            openai_provider = OpenAIProvider(api_key=primary_api_key)
             self.provider_manager.add_provider("openai", openai_provider)
 
         if claude_api_key:
@@ -90,7 +106,7 @@ class UltraGPT:
                     self.log.warning("Claude provider not available: %s", exc)
 
         if not self.provider_manager.providers:
-            raise ValueError("At least one API key (api_key or claude_api_key) must be provided")
+            raise ValueError("At least one API key must be provided for the selected provider(s)")
 
         self.tool_manager = ToolManager(self)
         self.chat_flow = ChatFlow(
@@ -297,6 +313,7 @@ class UltraGPT:
         tools: list = None,
         tools_config: dict = None,
     ) -> Tuple[Any, int, Dict[str, Any]]:
+        
         model = model or config.DEFAULT_MODEL
         temperature = temperature if temperature is not None else config.DEFAULT_TEMPERATURE
         reasoning_iterations = reasoning_iterations or config.DEFAULT_REASONING_ITERATIONS
