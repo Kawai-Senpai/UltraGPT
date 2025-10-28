@@ -135,16 +135,24 @@ def sanitize_tool_parameters_schema(raw_schema: Dict[str, Any]) -> Dict[str, Any
     """
     Sanitize a tool parameters schema for OpenAI's tool calling API.
     
-    OpenAI's tool schema validator (separate from strict mode) rejects:
-    1. $ref with sibling keywords: If a property has "$ref", it MUST ONLY contain "$ref"
-    2. "default" keyword: Causes 400 BadRequestError even with strict=False
-    3. anyOf/oneOf patterns: Often problematic for Optional fields
+    OpenAI's tool schema validator has strict requirements (separate from strict mode):
+    1. Root must be {"type": "object", "properties": {...}, "required": [...], "additionalProperties": false}
+    2. Every nested object MUST have additionalProperties: false
+    3. Every nested object MUST have required array with ALL property keys
+    4. Arrays MUST have "items" schema
+    5. $ref CANNOT have sibling keywords (default, description, title, etc)
+    6. No "default" keyword anywhere (causes 400 BadRequestError)
+    7. anyOf/oneOf should be normalized to simple types where possible
     
     This function:
+    - Ensures root is proper object schema
     - Fixes Pydantic Optional anyOf patterns (using normalize_pydantic_optional_fields)
     - Strips "default" keyword from all properties
-    - If a dict has "$ref", keeps ONLY "$ref" (removes description, title, etc)
-    - Does NOT add additionalProperties or force required (those are for output schemas only)
+    - If a dict has "$ref", keeps ONLY "$ref" (removes description, title, etc.)
+    - Ensures all objects have additionalProperties: false
+    - Ensures all objects have complete required arrays
+    - Ensures all arrays have items schema
+    - Does NOT add additionalProperties or force required at root (for backward compatibility)
     
     Use this for tool schemas before bind_tools(), not for output schemas.
     
@@ -172,30 +180,61 @@ def sanitize_tool_parameters_schema(raw_schema: Dict[str, Any]) -> Dict[str, Any
     import copy
     schema = copy.deepcopy(raw_schema)
     
-    # Step 1: Fix Pydantic Optional anyOf patterns first
+    # Step 1: Ensure root is proper object schema
+    if "type" not in schema:
+        schema["type"] = "object"
+    if schema.get("type") == "object":
+        if "properties" not in schema:
+            schema["properties"] = {}
+        # Note: We don't force required/additionalProperties at root for backward compat
+        # Individual providers or callers can add these if needed
+    
+    # Step 2: Fix Pydantic Optional anyOf patterns first
     normalize_pydantic_optional_fields(schema)
     
-    # Step 2: Walk the schema and apply OpenAI tool-specific rules
-    def walk(node: Any):
+    # Step 3: Walk the schema and apply OpenAI tool-specific rules recursively
+    def walk(node: Any, parent_key: str = "") -> None:
         if isinstance(node, dict):
-            # Rule: If this node has $ref, keep ONLY $ref
+            # Rule: If this node has $ref, keep ONLY $ref (strip all sibling keywords)
             if "$ref" in node:
                 ref_val = node["$ref"]
                 node.clear()
                 node["$ref"] = ref_val
                 return  # Don't recurse into $ref nodes
             
-            # Rule: Remove "default" keyword (OpenAI rejects it)
+            # Rule: Remove "default" keyword (OpenAI rejects it in tool schemas)
             if "default" in node:
                 node.pop("default", None)
             
+            # Rule: If this is an object type, ensure it has required + additionalProperties
+            if node.get("type") == "object":
+                # Ensure properties exists
+                if "properties" not in node:
+                    node["properties"] = {}
+                
+                # Ensure required array exists and contains ALL properties
+                # (OpenAI requires this even for "optional" fields)
+                if node["properties"]:
+                    node["required"] = list(node["properties"].keys())
+                elif "required" not in node:
+                    node["required"] = []
+                
+                # Ensure additionalProperties is false
+                node["additionalProperties"] = False
+            
+            # Rule: If this is an array type, ensure it has items
+            if node.get("type") == "array":
+                if "items" not in node:
+                    # Add a permissive items schema as fallback
+                    node["items"] = {"type": "string"}
+            
             # Recurse into nested structures
             for k, v in list(node.items()):
-                walk(v)
+                walk(v, parent_key=k)
         
         elif isinstance(node, list):
-            for item in node:
-                walk(item)
+            for i, item in enumerate(node):
+                walk(item, parent_key=f"{parent_key}[{i}]")
     
     walk(schema)
     return schema
