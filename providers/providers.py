@@ -36,9 +36,6 @@ from ..messaging import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_AUTO_INPUT_LIMIT = 128_000
-DEFAULT_RESERVE_RATIO = 0.8
-
 _openai_modules_warmed = False
 _openai_warm_lock = threading.Lock()
 
@@ -913,7 +910,7 @@ class ProviderManager:
         default_input_truncation: Optional[Union[str, int]] = config.DEFAULT_INPUT_TRUNCATION,
         logger: Optional[logging.Logger] = None,
         verbose: bool = False,
-        reserve_ratio: float = DEFAULT_RESERVE_RATIO,
+        reserve_ratio: float = config.DEFAULT_RESERVE_RATIO,
     ) -> None:
         self.providers: Dict[str, BaseProvider] = {}
         self._token_limiter = token_limiter or LangChainTokenLimiter()
@@ -948,7 +945,7 @@ class ProviderManager:
         provider = self.get_provider(provider_name)
 
         if setting in {None, "AUTO"}:
-            return provider.get_model_input_tokens(model_name) or DEFAULT_AUTO_INPUT_LIMIT
+            return provider.get_model_input_tokens(model_name) or config.DEFAULT_AUTO_INPUT_LIMIT
 
         if isinstance(setting, int) and setting > 0:
             return setting
