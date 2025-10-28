@@ -298,20 +298,38 @@ class OpenAIProvider(BaseProvider):
         
         # Track the LAST assistant message with tool_calls
         latest_assistant_tool_call_ids: List[str] = []
+        latest_assistant_tool_call_index: Optional[int] = None
         all_tool_messages_by_id: Dict[str, Dict[str, Any]] = {}
 
         # PASS 1: Find the most recent assistant with tool_calls
         # (iterating forward, last one wins)
-        for message in messages:
+        for idx, message in enumerate(messages):
             if message.get("role") == "assistant" and message.get("tool_calls"):
                 latest_assistant_tool_call_ids = [
                     tc.get("id")
                     for tc in message.get("tool_calls", [])
                     if tc.get("id")
                 ]
+                latest_assistant_tool_call_index = idx
+
+        # Determine if that most recent assistant tool call is still awaiting tool outputs.
+        pending_tool_followup = False
+        if latest_assistant_tool_call_index is not None:
+            saw_tool_result = False
+            for trailing in messages[latest_assistant_tool_call_index + 1 :]:
+                role = trailing.get("role")
+                if role in {"tool", "function"}:
+                    saw_tool_result = True
+                    continue
+                if role in {"assistant", "user"}:
+                    pending_tool_followup = False
+                    break
+            else:
+                if saw_tool_result:
+                    pending_tool_followup = True
 
         # PASS 2: Build items and index all tool messages
-        for message in messages:
+        for idx, message in enumerate(messages):
             role = message.get("role")
 
             if role in ("system", "developer"):
@@ -343,15 +361,6 @@ class OpenAIProvider(BaseProvider):
                         payload["id"] = call_id
                     all_tool_messages_by_id[call_id] = payload
 
-                # Still append to items for full history (non-follow-up case)
-                item_payload = {
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": output,
-                }
-                if isinstance(call_id, str) and call_id.startswith("fc"):
-                    item_payload["id"] = call_id
-                items.append(item_payload)
                 continue
 
             if role in ("system", "user", "assistant", "developer"):
@@ -374,26 +383,11 @@ class OpenAIProvider(BaseProvider):
                                 content_items.append({"type": "output_text", "text": segment})
                     
                     # Add tool_calls if present
-                    for tool_call in message.get("tool_calls") or []:
-                        call_id = tool_call.get("id") or tool_call.get("tool_call_id")
-                        function_data = tool_call.get("function", {}) or {}
-                        function_name = function_data.get("name")
-                        arguments = function_data.get("arguments")
-                        
-                        if arguments and not isinstance(arguments, str):
-                            try:
-                                arguments = json.dumps(arguments)
-                            except Exception:
-                                arguments = str(arguments)
-                        
-                        # CRITICAL FIX: Use "function_call" type and "call_id" field per OpenAI Responses API spec
-                        # See: https://docs.newapi.ai/en/api/openai-responses/
-                        content_items.append({
-                            "type": "function_call",  # Changed from "tool_call"
-                            "call_id": call_id,       # Changed from "id"
-                            "name": function_name,
-                            "arguments": arguments or "{}",
-                        })
+                    for _ in message.get("tool_calls") or []:
+                        # Tool call metadata is captured elsewhere (latest_assistant_tool_call_ids) so that we can
+                        # attach function outputs with previous_response_id. The Responses API rejects assistant
+                        # inputs that include "function_call" content blocks, so we intentionally skip adding them.
+                        pass
                     
                     # Ensure at least one content item
                     if not content_items:
@@ -424,11 +418,15 @@ class OpenAIProvider(BaseProvider):
         function_outputs: List[Dict[str, Any]] = []
         tool_result_ids: List[str] = []
 
-        for call_id in latest_assistant_tool_call_ids:
-            tool_msg = all_tool_messages_by_id.get(call_id)
-            if tool_msg:
-                function_outputs.append(tool_msg)
-                tool_result_ids.append(call_id)
+        if pending_tool_followup:
+            for call_id in latest_assistant_tool_call_ids:
+                tool_msg = all_tool_messages_by_id.get(call_id)
+                if tool_msg:
+                    function_outputs.append(tool_msg)
+                    tool_result_ids.append(call_id)
+        else:
+            function_outputs = []
+            tool_result_ids = []
 
         # Map those call_ids back to response.id
         # (all should share the same response.id anyway)
@@ -438,6 +436,23 @@ class OpenAIProvider(BaseProvider):
             if mapped_id:
                 previous_response_id = mapped_id
                 break
+
+        # Reconcile tool outputs with the response id that issued them
+        if previous_response_id:
+            filtered_outputs: List[Dict[str, Any]] = []
+            filtered_result_ids: List[str] = []
+            for call_id in tool_result_ids:
+                mapped_id = self._callid_to_responseid.get(call_id)
+                if mapped_id == previous_response_id:
+                    tool_msg = all_tool_messages_by_id.get(call_id)
+                    if tool_msg:
+                        filtered_outputs.append(tool_msg)
+                        filtered_result_ids.append(call_id)
+            function_outputs = filtered_outputs
+            tool_result_ids = filtered_result_ids
+        else:
+            function_outputs = []
+            tool_result_ids = []
 
         # Normalize tools
         normalized_tools: Optional[List[Dict[str, Any]]] = None
