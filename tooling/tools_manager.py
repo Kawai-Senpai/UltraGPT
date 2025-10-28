@@ -20,7 +20,10 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from pydantic import BaseModel
 
 from .. import config
-from ..schemas import normalize_pydantic_optional_fields, ensure_openai_strict_compliance
+from ..schemas import (
+    normalize_pydantic_optional_fields,
+    prepare_schema_for_openai,
+)
 
 class ToolManager:
     """
@@ -411,8 +414,8 @@ class ToolManager:
                 "description": "Whether to stop execution after this tool call (true if task is complete or user input needed, false to continue with more tools)"
             }
             
-            # Ensure additionalProperties is false and required includes all properties for OpenAI strict mode
-            ensure_openai_strict_compliance(parameters_schema)
+            # Finalize schema for strict mode: inline refs, flatten allOf, rebuild required, disallow extras
+            parameters_schema = prepare_schema_for_openai(parameters_schema)
             
             # Convert to OpenAI function calling format (Claude will handle conversion)
             native_tool = {

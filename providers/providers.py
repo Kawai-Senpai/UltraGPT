@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
@@ -33,6 +33,7 @@ from ..messaging import (
     LangChainTokenLimiter,
     ensure_langchain_messages,
     remove_orphaned_tool_results_lc,
+    drop_unresolved_tool_calls_lc,
 )
 
 logger = logging.getLogger(__name__)
@@ -290,9 +291,6 @@ class OpenAIProvider(BaseProvider):
         kwargs: Dict[str, Any] = {
             "model": model,
             "api_key": self.api_key,
-            "use_responses_api": True,
-            "output_version": "responses/v1",
-            "stream_usage": True,
         }
 
         if self._should_include_temperature(model):
@@ -482,56 +480,7 @@ class OpenAIProvider(BaseProvider):
         parsed_dict, tokens_used = self._finalize_structured_result(final_obj)
         return parsed_dict, tokens_used
 
-    @staticmethod
-    def _json_schema_type_to_pytype(prop_schema: Dict[str, Any]) -> Any:
-        schema_type = prop_schema.get("type")
-        if schema_type == "string":
-            return str
-        if schema_type == "number":
-            return float
-        if schema_type == "integer":
-            return int
-        if schema_type == "boolean":
-            return bool
-        if schema_type == "object":
-            return dict
-        if schema_type == "array":
-            return list
-        return Any
-
-    def _build_pydantic_tools_from_specs(self, tools: List[Dict[str, Any]]) -> Tuple[List[Any], bool]:
-        pydantic_models: List[Any] = []
-        strict_any = False
-
-        for tool in tools or []:
-            if tool.get("type") != "function":
-                pydantic_models.append(tool)
-                continue
-
-            fn_block = tool.get("function", {}) or {}
-            tool_name = fn_block.get("name") or "Tool"
-            description = fn_block.get("description") or ""
-            params_schema = fn_block.get("parameters") or {}
-            required_fields = params_schema.get("required", []) or []
-            properties = params_schema.get("properties", {}) or {}
-
-            if fn_block.get("strict") or tool.get("strict"):
-                strict_any = True
-
-            field_defs: Dict[str, Tuple[Any, Any]] = {}
-            for arg_name, arg_schema in properties.items():
-                py_type = self._json_schema_type_to_pytype(arg_schema)
-                arg_description = arg_schema.get("description", "") or ""
-                if arg_name in required_fields:
-                    field_defs[arg_name] = (py_type, Field(..., description=arg_description))
-                else:
-                    field_defs[arg_name] = (Optional[py_type], Field(default=None, description=arg_description))
-
-            dynamic_model = create_model(tool_name, **field_defs)  # type: ignore[arg-type]
-            dynamic_model.__doc__ = description or f"Tool {tool_name}"
-            pydantic_models.append(dynamic_model)
-
-        return pydantic_models, strict_any
+    # Removed dead Pydantic tool conversion utilities; we bind raw JSON tool specs directly now.
 
     @retry_on_rate_limit
     def chat_completion_with_tools(
@@ -546,13 +495,36 @@ class OpenAIProvider(BaseProvider):
         tool_choice: str = "required",
     ) -> Tuple[Dict[str, Any], int]:
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
-        pydantic_tools, strict_any = self._build_pydantic_tools_from_specs(tools)
-        llm_with_tools = llm.bind_tools(pydantic_tools, strict=strict_any)
+        
+        # Normalize tool format: ensure tools[0].function exists (OpenAI format)
+        normalized_tools = []
+        for tool in tools or []:
+            if isinstance(tool, dict):
+                if "function" in tool:
+                    # Already in correct format
+                    normalized_tools.append(tool)
+                elif "name" in tool and "type" in tool:
+                    # Old format: convert to new format
+                    normalized_tools.append({
+                        "type": tool.get("type", "function"),
+                        "function": {
+                            "name": tool["name"],
+                            "description": tool.get("description", ""),
+                            "parameters": tool.get("parameters", {}),
+                        }
+                    })
+                else:
+                    # Pass through unknown format
+                    normalized_tools.append(tool)
+            else:
+                normalized_tools.append(tool)
+        
+        # Bind tools in non-strict mode to mimic classic OpenAI function calling behavior
+        llm_with_tools = llm.bind_tools(normalized_tools, strict=False)
 
         invoke_kwargs: Dict[str, Any] = {}
-        if tool_choice == "required":
-            invoke_kwargs["tool_choice"] = "required"  # OpenAI changed from "any" to "required"
-        elif tool_choice != "auto":
+        if tool_choice and tool_choice != "auto":
+            # Only set when caller overrides default; otherwise let model decide
             invoke_kwargs["tool_choice"] = tool_choice
 
         if parallel_tool_calls is not None:
@@ -751,54 +723,7 @@ class ClaudeProvider(BaseProvider):
 
         return {"result": str(final_obj)}, tokens_used
 
-    def _json_schema_type_to_pytype(self, prop_schema: Dict[str, Any]) -> Any:
-        schema_type = prop_schema.get("type")
-        if schema_type == "string":
-            return str
-        if schema_type == "number":
-            return float
-        if schema_type == "integer":
-            return int
-        if schema_type == "boolean":
-            return bool
-        if schema_type == "object":
-            return dict
-        if schema_type == "array":
-            return list
-        return Any
-
-    def _build_pydantic_tools_from_specs(self, tools: List[Dict[str, Any]]) -> Tuple[List[Any], bool]:
-        pydantic_models: List[Any] = []
-        strict_any = False
-        for tool in tools or []:
-            if tool.get("type") != "function":
-                pydantic_models.append(tool)
-                continue
-
-            fn_block = tool.get("function", {}) or {}
-            tool_name = fn_block.get("name") or "Tool"
-            description = fn_block.get("description") or ""
-            params_schema = fn_block.get("parameters") or {}
-            required_fields = params_schema.get("required", []) or []
-            properties = params_schema.get("properties", {}) or {}
-
-            if fn_block.get("strict") or tool.get("strict"):
-                strict_any = True
-
-            field_defs: Dict[str, Tuple[Any, Any]] = {}
-            for arg_name, arg_schema in properties.items():
-                py_type = self._json_schema_type_to_pytype(arg_schema)
-                description_text = arg_schema.get("description", "") or ""
-                if arg_name in required_fields:
-                    field_defs[arg_name] = (py_type, Field(..., description=description_text))
-                else:
-                    field_defs[arg_name] = (Optional[py_type], Field(default=None, description=description_text))
-
-            dynamic_model = create_model(tool_name, **field_defs)  # type: ignore[arg-type]
-            dynamic_model.__doc__ = description or f"Tool {tool_name}"
-            pydantic_models.append(dynamic_model)
-
-        return pydantic_models, strict_any
+    # Removed dead Pydantic tool conversion utilities from Claude provider as well.
 
     @retry_on_rate_limit
     def chat_completion(
@@ -866,13 +791,13 @@ class ClaudeProvider(BaseProvider):
         tool_choice: str = "required",
     ) -> Tuple[Dict[str, Any], int]:
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
-        pydantic_tools, _strict_any = self._build_pydantic_tools_from_specs(tools)
+        # Pass raw JSON tool dicts directly; no Pydantic conversion
         
         # Map "required" to "any" for Claude (Anthropic uses "any")
         claude_tool_choice = "any" if tool_choice == "required" else tool_choice
         
         bound_llm = llm.bind_tools(
-            pydantic_tools,
+            tools,
             tool_choice=claude_tool_choice,
             parallel_tool_calls=parallel_tool_calls,
         )
@@ -976,6 +901,8 @@ class ProviderManager:
     ) -> List[BaseMessage]:
         lc_messages = ensure_langchain_messages(messages)
         cleaned = remove_orphaned_tool_results_lc(lc_messages, verbose=self._verbose)
+        # Also drop assistant messages that contain unresolved tool_calls to satisfy strict providers
+        cleaned = drop_unresolved_tool_calls_lc(cleaned, verbose=self._verbose)
 
         setting = input_truncation if input_truncation is not None else self._default_input_truncation
         max_tokens = self._resolve_limit(provider_name, model_name, setting)
@@ -995,7 +922,10 @@ class ProviderManager:
                 preserve_system=True,
                 verbose=self._verbose,
             )
-            return remove_orphaned_tool_results_lc(truncated, verbose=self._verbose)
+            # Re-sanitize after truncation in case pairing got broken
+            truncated = remove_orphaned_tool_results_lc(truncated, verbose=self._verbose)
+            truncated = drop_unresolved_tool_calls_lc(truncated, verbose=self._verbose)
+            return truncated
         except Exception as exc:  # noqa: BLE001
             if self._log:
                 self._log.error(

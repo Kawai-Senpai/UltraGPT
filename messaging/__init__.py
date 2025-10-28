@@ -5,6 +5,7 @@ from .history_utils import (
     filter_messages_safe_lc,
     remove_orphaned_tool_results_lc,
     validate_tool_call_pairing_lc,
+    drop_unresolved_tool_calls_lc,
 )
 from .message_ops import (
     add_message_before_system,
@@ -26,6 +27,7 @@ __all__ = [
     "validate_tool_call_pairing_lc",
     "concat_messages_safe_lc",
     "filter_messages_safe_lc",
+    "drop_unresolved_tool_calls_lc",
     "remove_orphaned_tool_results",
     "validate_tool_call_pairing",
     "concat_messages_safe",
