@@ -14,9 +14,12 @@ import os
 import json
 import inspect
 import importlib
+from typing import Any, List
+
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
-from . import config
+from .. import config
 
 class ToolManager:
     """
@@ -41,7 +44,8 @@ class ToolManager:
 
     def load_internal_tools(self, tools: list) -> dict:
         """Dynamically load internal tool configurations from tool directories"""
-        tools_base_path = os.path.join(os.path.dirname(__file__), 'tools')
+        package_root = os.path.dirname(os.path.dirname(__file__))
+        tools_base_path = os.path.join(package_root, "tools")
         loaded_tools = {}
         
         for tool_name in tools:
@@ -170,21 +174,20 @@ class ToolManager:
 
     def execute_tools(
         self,
-        history: list,
+        history: List[BaseMessage],
         tools: list,
         tools_config: dict
     ) -> tuple:
         """Execute tools using native AI tool calling - returns (result_string, tool_usage_details)"""
         tool_usage_details = []
-        
+
         if not tools or not history:
             return "", tool_usage_details
-        
-        # Get the latest user message from history
+
         message = ""
         for msg in reversed(history):
-            if msg.get("role") == "user" and msg.get("content"):
-                message = msg["content"]
+            if isinstance(msg, HumanMessage) and msg.content:
+                message = str(msg.content)
                 break
         
         if not message:
@@ -211,36 +214,31 @@ class ToolManager:
             for tool_name, tool_config in loaded_tools.items():
                 tool_descriptions.append(f"- {tool_config['display_name']}: {tool_config['description']}")
             
-            tool_selection_prompt = f"""
-Available internal tools:
-{chr(10).join(tool_descriptions)}
+            tool_selection_prompt = (
+                "Available internal tools:\n"
+                f"{chr(10).join(tool_descriptions)}\n\n"
+                "Analyze the user's message and select the appropriate tools with their parameters. Each tool should be called with the specific parameters needed to help answer the user's question.\n\n"
+                f"User message: \"{message}\"\n\n"
+                "IMPORTANT:\n"
+                "- Only call tools that meaningfully contribute to solving the user's request\n"
+                "- Follow each tool's schema when providing parameters\n"
+                "- Skip tool calls when they are unnecessary\n"
+                "- Multiple tools may be called sequentially when required\n"
+            )
 
-Analyze the user's message and select the appropriate tools with their parameters. Each tool should be called with the specific parameters needed to help answer the user's question.
+            tool_messages: List[BaseMessage] = [SystemMessage(content=tool_selection_prompt)]
 
-User message: "{message}"
+            context_window = history[-config.MAX_CONTEXT_MESSAGES : ] if config.MAX_CONTEXT_MESSAGES else history
+            trimmed_context: List[BaseMessage] = []
+            for context_msg in context_window:
+                if isinstance(context_msg, (HumanMessage, AIMessage)) and context_msg.content:
+                    trimmed_context.append(context_msg)
 
-IMPORTANT: 
-- Only call tools that are actually needed to help answer the user's question
-- Use the tool's schema to provide the correct parameters
-- If no tools are needed, don't call any tools
-- You can call multiple tools if needed
-"""
-            
-            # Prepare messages for tool calling
-            tool_messages = [
-                {"role": "system", "content": tool_selection_prompt},
-                {"role": "user", "content": message}
-            ]
-            
-            # Add conversation history context (limited)
-            if history:
-                context_messages = history[-config.MAX_CONTEXT_MESSAGES:]  # Last N messages for context
-                for msg in context_messages:
-                    if msg.get("content") and msg.get("role") in ["user", "assistant"]:
-                        tool_messages.insert(-1, {
-                            "role": msg["role"], 
-                            "content": msg["content"]
-                        })
+            if trimmed_context and isinstance(trimmed_context[-1], HumanMessage) and str(trimmed_context[-1].content) == message:
+                trimmed_context = trimmed_context[:-1]
+
+            tool_messages.extend(trimmed_context)
+            tool_messages.append(HumanMessage(content=message))
             
             # Get model from tools_config or use default
             model = config.DEFAULT_TOOLS_MODEL
