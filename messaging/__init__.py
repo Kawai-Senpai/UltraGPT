@@ -10,6 +10,7 @@ from .history_utils import (
 from .message_ops import (
     add_message_before_system,
     append_message_to_system,
+    consolidate_system_messages_safe,
     integrate_tool_call_prompt,
     turnoff_system_message,
 )
@@ -36,5 +37,6 @@ __all__ = [
     "append_message_to_system",
     "integrate_tool_call_prompt",
     "turnoff_system_message",
+    "consolidate_system_messages_safe",
     "LangChainTokenLimiter",
 ]

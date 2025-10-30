@@ -31,6 +31,7 @@ from .. import config
 from ..schemas import prepare_schema_for_openai, sanitize_tool_parameters_schema
 from ..messaging import (
     LangChainTokenLimiter,
+    consolidate_system_messages_safe,
     ensure_langchain_messages,
     remove_orphaned_tool_results_lc,
     drop_unresolved_tool_calls_lc,
@@ -437,7 +438,8 @@ class OpenAIProvider(BaseProvider):
         deepthink: Optional[bool] = None,
     ) -> Tuple[str, int]:
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
-        stream = llm.stream(messages)
+        prepared_messages = messages
+        stream = llm.stream(prepared_messages)
         final_chunk = self._accumulate_stream(stream)
         content = getattr(final_chunk, "content", "") or ""
         
@@ -466,6 +468,7 @@ class OpenAIProvider(BaseProvider):
         deepthink: Optional[bool] = None,
     ) -> Tuple[Dict[str, Any], int]:
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
+        prepared_messages = messages
         
         # Prepare schema for OpenAI strict mode compliance
         schema_dict = prepare_schema_for_openai(schema.model_json_schema())
@@ -475,7 +478,7 @@ class OpenAIProvider(BaseProvider):
             include_raw=True,
             method="json_schema",
         )
-        stream = structured_llm.stream(messages)
+        stream = structured_llm.stream(prepared_messages)
         final_obj = self._accumulate_structured_stream(stream)
         parsed_dict, tokens_used = self._finalize_structured_result(final_obj)
         return parsed_dict, tokens_used
@@ -495,6 +498,7 @@ class OpenAIProvider(BaseProvider):
         tool_choice: str = "required",
     ) -> Tuple[Dict[str, Any], int]:
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
+        prepared_messages = messages
         
         # Normalize tool format: ensure tools[0].function exists (OpenAI format)
         # Also sanitize parameter schemas to avoid OpenAI 400 errors
@@ -541,7 +545,7 @@ class OpenAIProvider(BaseProvider):
         if parallel_tool_calls is not None:
             invoke_kwargs["parallel_tool_calls"] = parallel_tool_calls
 
-        stream = llm_with_tools.stream(messages, **invoke_kwargs)
+        stream = llm_with_tools.stream(prepared_messages, **invoke_kwargs)
         final_chunk = self._accumulate_stream(stream)
         tokens_used = self._usage_total_tokens_from_message(final_chunk)
 
@@ -746,7 +750,8 @@ class ClaudeProvider(BaseProvider):
         deepthink: Optional[bool] = None,
     ) -> Tuple[str, int]:
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
-        stream = llm.stream(messages)
+        prepared_messages = messages
+        stream = llm.stream(prepared_messages)
         final_chunk = self._accumulate_stream(stream)
         content = getattr(final_chunk, "content", "") or ""
         
@@ -775,6 +780,7 @@ class ClaudeProvider(BaseProvider):
         deepthink: Optional[bool] = None,
     ) -> Tuple[Dict[str, Any], int]:
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
+        prepared_messages = messages
         
         # Prepare schema for strict mode compliance (Claude also benefits from clean schemas)
         schema_dict = prepare_schema_for_openai(schema.model_json_schema())
@@ -784,7 +790,7 @@ class ClaudeProvider(BaseProvider):
             include_raw=True,
             method="json_schema",
         )
-        stream = structured_llm.stream(messages)
+        stream = structured_llm.stream(prepared_messages)
         final_obj = self._accumulate_structured_stream(stream)
         parsed_dict, tokens_used = self._finalize_structured_result(final_obj)
         return parsed_dict, tokens_used
@@ -802,6 +808,7 @@ class ClaudeProvider(BaseProvider):
         tool_choice: str = "required",
     ) -> Tuple[Dict[str, Any], int]:
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
+        prepared_messages = messages
         
         # Sanitize tool parameter schemas to avoid validation errors
         # Claude doesn't have the same strict requirements as OpenAI, but cleaning doesn't hurt
@@ -836,7 +843,7 @@ class ClaudeProvider(BaseProvider):
             tool_choice=claude_tool_choice,
             parallel_tool_calls=parallel_tool_calls,
         )
-        stream = bound_llm.stream(messages)
+        stream = bound_llm.stream(prepared_messages)
         final_chunk = self._accumulate_stream(stream)
         tokens_used = self._usage_total_tokens_from_message(final_chunk)
 
@@ -938,6 +945,10 @@ class ProviderManager:
         cleaned = remove_orphaned_tool_results_lc(lc_messages, verbose=self._verbose)
         # Also drop assistant messages that contain unresolved tool_calls to satisfy strict providers
         cleaned = drop_unresolved_tool_calls_lc(cleaned, verbose=self._verbose)
+        
+        # CONSOLIDATE system messages BEFORE truncation (important!)
+        # This ensures we truncate with a single system message, not multiple scattered ones
+        cleaned = consolidate_system_messages_safe(cleaned)
 
         setting = input_truncation if input_truncation is not None else self._default_input_truncation
         max_tokens = self._resolve_limit(provider_name, model_name, setting)
