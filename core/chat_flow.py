@@ -145,7 +145,7 @@ class ChatFlow:
 
         tool_response, tool_usage_details = self._tools.execute_tools(lc_messages, tools, tools_config)
         if tool_response:
-            lc_messages = append_message_to_system(lc_messages, f"Tool Responses:\n{tool_response}")
+            lc_messages = append_message_to_system(lc_messages, f"Helpful Details:\n{tool_response}")
 
         native_tools = self._tools.convert_user_tools_to_native_format(user_tools)
 

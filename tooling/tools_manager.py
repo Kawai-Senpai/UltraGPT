@@ -405,13 +405,13 @@ class ToolManager:
             # Add reasoning parameter
             parameters_schema["properties"]["reasoning"] = {
                 "type": "string",
-                "description": "Detailed reasoning for why this tool was chosen and how it will help solve the user's request"
+                "description": "Reasoning for the action"
             }
             
             # Add stop_after_tool_call parameter  
             parameters_schema["properties"]["stop_after_tool_call"] = {
                 "type": "boolean",
-                "description": "Whether to stop execution after this tool call (true if task is complete or user input needed, false to continue with more tools)"
+                "description": "True to stop completely, set false to see the tool-result for this tool call or continue with more tools"
             }
             
             # Finalize schema for strict mode: inline refs, flatten allOf, rebuild required, disallow extras

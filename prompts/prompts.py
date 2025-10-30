@@ -115,7 +115,7 @@ def generate_tool_call_prompt(user_tools: list, allow_multiple: bool = True) -> 
     for tool in user_tools:
         # Build tool info with support for both UserTool and ExpertTool
         tools_info += f"""
-Tool Name: {tool['name']}
+Tool: {tool['name']}
 Description: {tool['description']}
 When to use: {tool['when_to_use']}
 Usage Guide: {tool['usage_guide']}"""
@@ -125,35 +125,19 @@ Usage Guide: {tool['usage_guide']}"""
             tools_info += f"\nExpert Category: {tool['expert_category']}"
         if 'prerequisites' in tool and tool['prerequisites']:
             tools_info += f"\nPrerequisites: {', '.join(tool['prerequisites'])}"
-            
-        tools_info += f"\nParameters Schema: {tool['parameters_schema']}\n---\n"
     
+        # Add newline for separation between tools
+        tools_info += "\n"
+
     multiple_instruction = "You can call multiple tools if needed." if allow_multiple else "You can only call ONE tool at a time."
     
-    return f"""You are an expert AI assistant with access to the following tools. Your task is to analyze the user's request and determine which tool(s) to call and with what parameters.
-
-Available Tools:
+    return f"""Available Tools:
 {tools_info}
 
-Instructions:
-- Carefully analyze the user's request to understand what they need
-- Use your reasoning capabilities to determine which tool(s) would be most appropriate
-- Generate the exact parameters needed for each tool call based on the user's request
+Tool Instructions:
 - {multiple_instruction}
-- If no further tools are needed after this, use the 'stop_after_tool_call' tool to indicate no action is required after calling a tool.
-
-For each tool call, you must:
-1. Identify the most appropriate tool for the task
-2. Extract or generate the exact parameters needed from the user's request
-3. Provide clear, user-friendly reasoning that explains how you'll help them accomplish their goal
-
-IMPORTANT: Your reasoning should be written as if you're a helpful assistant talking directly to the user. 
-- Don't mention technical tool names or parameter details
-- Focus on explaining how you'll help them achieve their goal
-- Sound natural and conversational
-- Example: "I'll help you send that email to John with your project update" instead of "The 'send_email' tool is appropriate with parameters recipient, subject, body"
-
-Your response must be in the specified JSON format with tool calls and reasoning."""
+- Use 'stop_after_tool_call' param only when no more tool calls are needed.
+- It ends the session immediately and you will not see the tool’s result, so only use it after you have seen the results and are sure."""
 
 def generate_single_tool_call_prompt(user_tools: list) -> str:
     """Generate prompt for single tool calling"""

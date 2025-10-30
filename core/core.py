@@ -344,56 +344,57 @@ class UltraGPT:
         steps_tokens = 0
         steps_tools_used: List[Dict[str, Any]] = []
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures: List[Tuple[str, Any]] = []
-            if reasoning_pipeline:
-                futures.append(
-                    (
-                        "reasoning",
-                        executor.submit(
-                            self.pipeline_runner.run_reasoning_pipeline,
-                            base_messages,
-                            model,
-                            temperature,
-                            reasoning_iterations,
-                            tools,
-                            tools_config,
-                            reasoning_model=reasoning_model,
-                            max_tokens=max_tokens,
-                            input_truncation=input_truncation,
-                            deepthink=False,
-                        ),
+        if reasoning_pipeline or steps_pipeline:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures: List[Tuple[str, Any]] = []
+                if reasoning_pipeline:
+                    futures.append(
+                        (
+                            "reasoning",
+                            executor.submit(
+                                self.pipeline_runner.run_reasoning_pipeline,
+                                base_messages,
+                                model,
+                                temperature,
+                                reasoning_iterations,
+                                tools,
+                                tools_config,
+                                reasoning_model=reasoning_model,
+                                max_tokens=max_tokens,
+                                input_truncation=input_truncation,
+                                deepthink=False,
+                            ),
+                        )
                     )
-                )
-            if steps_pipeline:
-                futures.append(
-                    (
-                        "steps",
-                        executor.submit(
-                            self.pipeline_runner.run_steps_pipeline,
-                            base_messages,
-                            model,
-                            temperature,
-                            tools,
-                            tools_config,
-                            steps_model=steps_model,
-                            max_tokens=max_tokens,
-                            input_truncation=input_truncation,
-                            deepthink=False,
-                        ),
+                if steps_pipeline:
+                    futures.append(
+                        (
+                            "steps",
+                            executor.submit(
+                                self.pipeline_runner.run_steps_pipeline,
+                                base_messages,
+                                model,
+                                temperature,
+                                tools,
+                                tools_config,
+                                steps_model=steps_model,
+                                max_tokens=max_tokens,
+                                input_truncation=input_truncation,
+                                deepthink=False,
+                            ),
+                        )
                     )
-                )
 
-            for label, future in futures:
-                result, tokens, details = future.result()
-                if label == "reasoning":
-                    reasoning_output = result
-                    reasoning_tokens = tokens
-                    reasoning_tools_used = details.get("tools_used", [])
-                else:
-                    steps_output = result
-                    steps_tokens = tokens
-                    steps_tools_used = details.get("tools_used", [])
+                for label, future in futures:
+                    result, tokens, details = future.result()
+                    if label == "reasoning":
+                        reasoning_output = result
+                        reasoning_tokens = tokens
+                        reasoning_tools_used = details.get("tools_used", [])
+                    else:
+                        steps_output = result
+                        steps_tokens = tokens
+                        steps_tools_used = details.get("tools_used", [])
 
         conclusion = steps_output.get("conclusion", "")
         steps_list = steps_output.get("steps", [])
@@ -484,6 +485,7 @@ class UltraGPT:
         tools_config: dict = None,
         max_tokens: Optional[int] = None,
     ) -> Tuple[Any, int, Dict[str, Any]]:
+    
         model = model or config.DEFAULT_MODEL
         temperature = temperature if temperature is not None else config.DEFAULT_TEMPERATURE
         reasoning_iterations = reasoning_iterations if reasoning_iterations is not None else config.DEFAULT_REASONING_ITERATIONS
@@ -509,56 +511,57 @@ class UltraGPT:
         steps_tokens = 0
         steps_tools_used: List[Dict[str, Any]] = []
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures: List[Tuple[str, Any]] = []
-            if reasoning_pipeline:
-                futures.append(
-                    (
-                        "reasoning",
-                        executor.submit(
-                            self.pipeline_runner.run_reasoning_pipeline,
-                            tool_call_messages,
-                            model,
-                            temperature,
-                            reasoning_iterations,
-                            tools,
-                            tools_config,
-                            reasoning_model=reasoning_model,
-                            max_tokens=max_tokens,
-                            input_truncation=input_truncation,
-                            deepthink=False,
-                        ),
+        if reasoning_pipeline or steps_pipeline:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures: List[Tuple[str, Any]] = []
+                if reasoning_pipeline:
+                    futures.append(
+                        (
+                            "reasoning",
+                            executor.submit(
+                                self.pipeline_runner.run_reasoning_pipeline,
+                                tool_call_messages,
+                                model,
+                                temperature,
+                                reasoning_iterations,
+                                tools,
+                                tools_config,
+                                reasoning_model=reasoning_model,
+                                max_tokens=max_tokens,
+                                input_truncation=input_truncation,
+                                deepthink=False,
+                            ),
+                        )
                     )
-                )
-            if steps_pipeline:
-                futures.append(
-                    (
-                        "steps",
-                        executor.submit(
-                            self.pipeline_runner.run_steps_pipeline,
-                            tool_call_messages,
-                            model,
-                            temperature,
-                            tools,
-                            tools_config,
-                            steps_model=steps_model,
-                            max_tokens=max_tokens,
-                            input_truncation=input_truncation,
-                            deepthink=False,
-                        ),
+                if steps_pipeline:
+                    futures.append(
+                        (
+                            "steps",
+                            executor.submit(
+                                self.pipeline_runner.run_steps_pipeline,
+                                tool_call_messages,
+                                model,
+                                temperature,
+                                tools,
+                                tools_config,
+                                steps_model=steps_model,
+                                max_tokens=max_tokens,
+                                input_truncation=input_truncation,
+                                deepthink=False,
+                            ),
+                        )
                     )
-                )
 
-            for label, future in futures:
-                result, tokens, details = future.result()
-                if label == "reasoning":
-                    reasoning_output = result
-                    reasoning_tokens = tokens
-                    reasoning_tools_used = details.get("tools_used", [])
-                else:
-                    steps_output = result
-                    steps_tokens = tokens
-                    steps_tools_used = details.get("tools_used", [])
+                for label, future in futures:
+                    result, tokens, details = future.result()
+                    if label == "reasoning":
+                        reasoning_output = result
+                        reasoning_tokens = tokens
+                        reasoning_tools_used = details.get("tools_used", [])
+                    else:
+                        steps_output = result
+                        steps_tokens = tokens
+                        steps_tools_used = details.get("tools_used", [])
 
         conclusion = steps_output.get("conclusion", "")
         combined_prompt = None
