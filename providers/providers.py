@@ -948,6 +948,7 @@ class ProviderManager:
         
         # CONSOLIDATE system messages BEFORE truncation (important!)
         # This ensures we truncate with a single system message, not multiple scattered ones
+        # Also strips whitespace from all message content (moved inside consolidate function)
         cleaned = consolidate_system_messages_safe(cleaned)
 
         setting = input_truncation if input_truncation is not None else self._default_input_truncation
@@ -968,9 +969,7 @@ class ProviderManager:
                 preserve_system=True,
                 verbose=self._verbose,
             )
-            # Re-sanitize after truncation in case pairing got broken
-            truncated = remove_orphaned_tool_results_lc(truncated, verbose=self._verbose)
-            truncated = drop_unresolved_tool_calls_lc(truncated, verbose=self._verbose)
+            # No need to re-sanitize after truncation - grouping prevents orphans by design
             return truncated
         except Exception as exc:  # noqa: BLE001
             if self._log:

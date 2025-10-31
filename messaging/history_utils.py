@@ -140,10 +140,68 @@ def drop_unresolved_tool_calls_lc(messages: List[BaseMessage], verbose: bool = F
 
     return cleaned
 
+
+def group_tool_call_pairs_lc(messages: List[BaseMessage]) -> List[List[BaseMessage]]:
+    """Group AIMessage with tool_calls and their corresponding ToolMessage results.
+    
+    Returns a list of groups where each group is:
+    - [AIMessage with tool_calls, ToolMessage, ToolMessage, ...] for tool call sequences
+    - [single message] for all other messages
+    
+    This grouping ensures atomic removal during truncation - if we need to drop
+    a tool call, we drop the entire group (call + all results), maintaining
+    message integrity for providers like Claude that validate tool pairing.
+    """
+    if not messages:
+        return []
+    
+    groups: List[List[BaseMessage]] = []
+    i = 0
+    
+    while i < len(messages):
+        message = messages[i]
+        
+        # Check if this is an AIMessage with tool_calls
+        if isinstance(message, AIMessage):
+            tool_calls = getattr(message, "tool_calls", []) or []
+            if tool_calls:
+                # Start a new group with this AI message
+                group = [message]
+                call_ids = {call.get("id") for call in tool_calls if call.get("id")}
+                
+                # Look ahead for matching ToolMessages
+                j = i + 1
+                while j < len(messages) and call_ids:
+                    next_msg = messages[j]
+                    if isinstance(next_msg, ToolMessage):
+                        tool_call_id = getattr(next_msg, "tool_call_id", None)
+                        if tool_call_id in call_ids:
+                            group.append(next_msg)
+                            call_ids.discard(tool_call_id)
+                            j += 1
+                        else:
+                            # Tool message doesn't match this group
+                            break
+                    else:
+                        # Non-tool message, stop grouping
+                        break
+                
+                groups.append(group)
+                i = j
+                continue
+        
+        # Single message group
+        groups.append([message])
+        i += 1
+    
+    return groups
+
+
 __all__ = [
     "remove_orphaned_tool_results_lc",
     "validate_tool_call_pairing_lc",
     "concat_messages_safe_lc",
     "filter_messages_safe_lc",
     "drop_unresolved_tool_calls_lc",
+    "group_tool_call_pairs_lc",
 ]

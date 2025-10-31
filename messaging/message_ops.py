@@ -17,6 +17,9 @@ def consolidate_system_messages_safe(messages: List[BaseMessage]) -> List[BaseMe
     
     Finds the safest position that doesn't break tool call/result adjacency.
     Prefers position 0, but can insert elsewhere if needed.
+    
+    Also strips whitespace from all message content to satisfy strict provider validation
+    (e.g., Claude rejects messages with trailing whitespace).
     """
     if not messages:
         return []
@@ -24,8 +27,12 @@ def consolidate_system_messages_safe(messages: List[BaseMessage]) -> List[BaseMe
     system_contents: List[str] = []
     non_system_messages: List[BaseMessage] = []
     
-    # Single pass to separate and collect
+    # Single pass to separate, collect, and strip content
     for msg in messages:
+        # Strip whitespace from message content if it's a string
+        if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content:
+            msg.content = msg.content.strip()
+        
         if isinstance(msg, SystemMessage) and msg.content:
             system_contents.append(msg.content)
         elif not isinstance(msg, SystemMessage):
@@ -37,7 +44,8 @@ def consolidate_system_messages_safe(messages: List[BaseMessage]) -> List[BaseMe
     # Find safe insertion position
     insertion_index = _find_safe_system_insert_index(non_system_messages)
     
-    consolidated_content = "\n\n".join(system_contents).strip()
+    # Join system messages (individual contents already stripped above)
+    consolidated_content = "\n\n".join(system_contents)
     consolidated_system = SystemMessage(content=consolidated_content)
     
     # Insert at safe position
