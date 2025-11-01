@@ -342,6 +342,17 @@ class BaseOpenAICompatibleProvider(BaseProvider):
     ) -> ChatOpenAI:
         return self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
 
+    def _build_extra_body(
+        self,
+        model: str,
+        max_tokens: Optional[int],
+        deepthink: Optional[bool],
+    ) -> Optional[Dict[str, Any]]:
+        """Construct provider-specific extra_body payload."""
+        if deepthink is True and hasattr(self, "_does_support_thinking") and self._does_support_thinking(model):
+            return {"reasoning": {"effort": "high"}}
+        return None
+
     @staticmethod
     def _accumulate_stream(stream_iter) -> AIMessageChunk:
         """Merge AIMessageChunk pieces yielded by llm.stream."""
@@ -509,10 +520,8 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         max_tokens: Optional[int] = None,
         deepthink: Optional[bool] = None,
     ) -> Tuple[str, int, Dict[str, Any]]:
-        # Build extra_body for reasoning only if deepthink is explicitly True
-        extra_kwargs = {}
-        if deepthink is True and hasattr(self, '_does_support_thinking') and self._does_support_thinking(model):
-            extra_kwargs["extra_body"] = {"reasoning": {"effort": "high"}}
+        extra_body = self._build_extra_body(model, max_tokens, deepthink)
+        extra_kwargs = {"extra_body": extra_body} if extra_body else {}
         
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens, extra_kwargs=extra_kwargs)
         stream = llm.stream(messages)
@@ -532,10 +541,8 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         max_tokens: Optional[int] = None,
         deepthink: Optional[bool] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
-        # Build extra_body for reasoning only if deepthink is explicitly True
-        extra_kwargs = {}
-        if deepthink is True and hasattr(self, '_does_support_thinking') and self._does_support_thinking(model):
-            extra_kwargs["extra_body"] = {"reasoning": {"effort": "high"}}
+        extra_body = self._build_extra_body(model, max_tokens, deepthink)
+        extra_kwargs = {"extra_body": extra_body} if extra_body else {}
         
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens, extra_kwargs=extra_kwargs)
         schema_dict = prepare_schema_for_openai(schema.model_json_schema())
@@ -656,10 +663,8 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         deepthink: Optional[bool] = None,
         tool_choice: str = "required",
     ) -> Tuple[Dict[str, Any], int]:
-        # Build extra_body for reasoning only if deepthink is explicitly True
-        extra_kwargs = {}
-        if deepthink is True and hasattr(self, '_does_support_thinking') and self._does_support_thinking(model):
-            extra_kwargs["extra_body"] = {"reasoning": {"effort": "high"}}
+        extra_body = self._build_extra_body(model, max_tokens, deepthink)
+        extra_kwargs = {"extra_body": extra_body} if extra_body else {}
         
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens, extra_kwargs=extra_kwargs)
         
@@ -763,12 +768,20 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "anthropic/claude-sonnet",  # Claude Sonnet family supports reasoning tokens
         "anthropic/claude-3.7-sonnet",  # Explicit prefix for 3.7 Sonnet slug
         "anthropic/claude-opus",  # Claude Opus family supports reasoning tokens
+        "deepseek/deepseek-chat",  # DeepSeek v3.1 exposes reasoning traces via effort flag
+        "x-ai/grok-4",  # Grok 4 always returns reasoning traces
     ]
     
     # Models that DON'T support native structured output via LangChain's with_structured_output
     # Need tool-based workaround (convert schema to tool)
     NO_NATIVE_STRUCTURED_OUTPUT = [
         "anthropic/claude",  # All Claude models via OpenRouter don't support native structured output
+    ]
+
+    # Models that expect max_output_tokens instead of max_tokens in the payload
+    MAX_OUTPUT_TOKEN_MODELS = [
+        "google/gemini",
+        "x-ai/grok-4",
     ]
 
     # Model slug mappings for friendly names → OpenRouter format
@@ -786,6 +799,16 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "claude-3-5-haiku": "anthropic/claude-3.5-haiku",
         "claude-3-haiku": "anthropic/claude-3-haiku",
         # GPT models pass through as-is
+        # Gemini models
+        "gemini-2.5-pro": "google/gemini-2.5-pro",
+        "gemini-pro-2.5": "google/gemini-2.5-pro",
+        "gemini-pro": "google/gemini-2.5-pro",
+        "gemini25pro": "google/gemini-2.5-pro",
+        # Grok models
+        "grok-4": "x-ai/grok-4",
+        # DeepSeek models
+        "deepseek-chat-v3.1": "deepseek/deepseek-chat-v3.1",
+        "deepseek-v3.1": "deepseek/deepseek-chat-v3.1",
         # Llama, Mistral, etc. pass through as-is
     }
 
@@ -825,6 +848,18 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "gpt-4-turbo": {"max_input_tokens": 128000, "max_output_tokens": 4096},
         "gpt-3.5-turbo": {"max_input_tokens": 16385, "max_output_tokens": 4096},
 
+        # Gemini models
+        "gemini-2.5-pro": {"max_input_tokens": 1_048_576, "max_output_tokens": 65535},
+        "google/gemini-2.5-pro": {"max_input_tokens": 1_048_576, "max_output_tokens": 65535},
+
+        # Grok model
+        "grok-4": {"max_input_tokens": 256_000, "max_output_tokens": 32768},
+        "x-ai/grok-4": {"max_input_tokens": 256_000, "max_output_tokens": 32768},
+
+        # DeepSeek model
+        "deepseek-chat-v3.1": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
+        "deepseek/deepseek-chat-v3.1": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
+
         # Llama models
         "llama-3.3": {"max_input_tokens": 128000, "max_output_tokens": 8192},
         "llama-3.1": {"max_input_tokens": 128000, "max_output_tokens": 8192},
@@ -863,6 +898,9 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
             "haiku": "anthropic/claude-3-haiku",
             "sonnet": "anthropic/claude-3.7-sonnet",
             "opus": "anthropic/claude-opus-4",
+            "gemini": "google/gemini-2.5-pro",
+            "grok": "x-ai/grok-4",
+            "deepseek": "deepseek/deepseek-chat-v3.1",
         }
 
         name_key = model.lower().strip()
@@ -891,12 +929,37 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
     def _should_include_max_tokens(self, model: str) -> bool:
         """Check if max_tokens parameter should be included for this model."""
         transformed = self._transform_model_name(model)
-        return not any(transformed.startswith(prefix) for prefix in self.NO_MAX_TOKENS_MODELS)
+        if any(transformed.startswith(prefix) for prefix in self.NO_MAX_TOKENS_MODELS):
+            return False
+        if any(transformed.startswith(prefix) for prefix in self.MAX_OUTPUT_TOKEN_MODELS):
+            return False
+        return True
 
     def _supports_native_structured_output(self, model: str) -> bool:
         """Check if model supports native structured output via LangChain's with_structured_output."""
         transformed = self._transform_model_name(model)
         return not any(transformed.startswith(prefix) for prefix in self.NO_NATIVE_STRUCTURED_OUTPUT)
+
+    def _build_extra_body(
+        self,
+        model: str,
+        max_tokens: Optional[int],
+        deepthink: Optional[bool],
+    ) -> Optional[Dict[str, Any]]:
+        base_extra = super()._build_extra_body(model, max_tokens, deepthink) or {}
+        extra_body: Dict[str, Any] = dict(base_extra)
+
+        transformed = self._transform_model_name(model)
+        needs_max_output_tokens = any(
+            transformed.startswith(prefix) for prefix in self.MAX_OUTPUT_TOKEN_MODELS
+        )
+        if needs_max_output_tokens:
+            desired_tokens = max_tokens
+            if desired_tokens is None:
+                desired_tokens = self._guess_max_output_tokens(model) or config.DEFAULT_MAX_OUTPUT_TOKENS
+            extra_body["max_output_tokens"] = desired_tokens
+
+        return extra_body or None
 
     @retry_on_rate_limit
     def chat_completion_with_schema(
