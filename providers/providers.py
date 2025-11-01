@@ -42,7 +42,6 @@ logger = logging.getLogger(__name__)
 _openai_modules_warmed = False
 _openai_warm_lock = threading.Lock()
 
-
 def _warm_openai_modules() -> None:
     """Preload OpenAI modules to avoid ModuleLock contention under threading."""
     global _openai_modules_warmed
@@ -66,7 +65,6 @@ def _warm_openai_modules() -> None:
                 logger.debug("Optional OpenAI warmup import failed for %s: %s", module_name, exc)
 
         _openai_modules_warmed = True
-
 
 def _parse_retry_after(retry_after_value: Optional[str]) -> Optional[float]:
     """Convert a Retry-After header to seconds."""
@@ -92,7 +90,6 @@ def _parse_retry_after(retry_after_value: Optional[str]) -> Optional[float]:
     delay_seconds = (retry_datetime - datetime.now(timezone.utc)).total_seconds()
     return max(0.0, delay_seconds)
 
-
 def is_rate_limit_error(error: Exception) -> bool:
     """Return True if the error looks like a rate limit response."""
     error_str = str(error).lower()
@@ -112,7 +109,6 @@ def is_rate_limit_error(error: Exception) -> bool:
         "rate-limit",
     ]
     return any(keyword in error_str for keyword in keywords)
-
 
 def retry_on_rate_limit(func):
     """Retry decorated function on rate limit errors using exponential backoff."""
@@ -175,7 +171,6 @@ def retry_on_rate_limit(func):
 
     return wrapper
 
-
 class BaseProvider:
     """Abstract provider contract."""
 
@@ -226,8 +221,6 @@ class BaseProvider:
         max_tokens: Optional[int] = None,
     ):
         raise NotImplementedError
-
-
 
 class OpenAIProvider(BaseProvider):
     """OpenAI provider implementation built on LangChain ChatOpenAI."""
@@ -579,7 +572,6 @@ class OpenAIProvider(BaseProvider):
 
         return response_message, tokens_used
 
-
 class ClaudeProvider(BaseProvider):
     """Anthropic Claude provider through LangChain ChatAnthropic.
 
@@ -877,7 +869,6 @@ class ClaudeProvider(BaseProvider):
 
         return response_message, tokens_used
 
-
 class ProviderManager:
     """Registry facade for providers with centralized truncation and cleanup."""
 
@@ -1059,7 +1050,6 @@ class ProviderManager:
             deepthink,
             tool_choice,
         )
-
 
 __all__ = [
     "BaseProvider",
