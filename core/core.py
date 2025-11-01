@@ -21,7 +21,7 @@ from ..prompts import (
     generate_multiple_tool_call_prompt,
     generate_single_tool_call_prompt,
 )
-from ..providers import ClaudeProvider, OpenAIProvider, ProviderManager
+from ..providers import OpenRouterProvider, ProviderManager
 from ..tooling import ToolManager
 from ..tools.web_search.core import google_search, scrape_url
 from .chat_flow import ChatFlow
@@ -34,9 +34,7 @@ class UltraGPT:
     def __init__(
         self,
         api_key: str = None,
-        openai_api_key: str = None,
-        claude_api_key: str = None,
-        provider: str = None,
+        openrouter_api_key: str = None,
         google_api_key: str = None,
         search_engine_id: str = None,
         max_tokens: Optional[int] = None,
@@ -49,20 +47,28 @@ class UltraGPT:
         log_to_console: bool = False,
         log_level: str = "DEBUG",
     ) -> None:
-        if openai_api_key and api_key and openai_api_key != api_key:
-            raise ValueError("Provide either api_key or openai_api_key, not both")
+        """Initialize UltraGPT with OpenRouter provider.
+        
+        Args:
+            api_key: Alias for openrouter_api_key (backward compat)
+            openrouter_api_key: OpenRouter API key (ALL models: gpt-*, claude-*, llama-*, etc.)
+            
+        OpenRouter supports all models through a unified endpoint:
+        - Configure BYOK (Bring Your Own Key) in OpenRouter dashboard for OpenAI models
+        - Extended 1M context for Claude Sonnet 4/4.5
+        - Native reasoning support for o-series, gpt-5, and Claude models
+        """
+        if openrouter_api_key and api_key and openrouter_api_key != api_key:
+            raise ValueError("Provide either api_key or openrouter_api_key, not both")
 
-        # Backwards compatibility: some callers used provider="openai"/"anthropic"
-        if provider and provider not in {"openai", "anthropic", "claude"}:
-            raise ValueError("provider must be 'openai' or 'anthropic'")
-
-        primary_api_key = openai_api_key or api_key
-
-        # If provider is explicitly set, only enable that provider
-        if provider == "openai":
-            claude_api_key = None
-        elif provider in {"anthropic", "claude"}:
-            primary_api_key = None
+        final_api_key = openrouter_api_key or api_key
+        
+        if not final_api_key:
+            raise ValueError(
+                "OpenRouter API key is required.\n"
+                "Provide: openrouter_api_key for universal access (gpt-*, claude-*, llama-*, etc.)\n"
+                "Configure BYOK in OpenRouter dashboard: https://openrouter.ai/keys"
+            )
 
         self.verbose = verbose
         self.google_api_key = google_api_key
@@ -82,7 +88,7 @@ class UltraGPT:
         self.log.info("Initializing UltraGPT")
         if self.verbose:
             self.log.debug("=" * 50)
-            self.log.debug("Initializing UltraGPT")
+            self.log.debug("Initializing UltraGPT (OpenRouter Only)")
             self.log.debug("=" * 50)
 
         self.token_limiter = LangChainTokenLimiter(log_handler=self.log)
@@ -93,20 +99,18 @@ class UltraGPT:
             verbose=self.verbose,
         )
 
-        if primary_api_key:
-            openai_provider = OpenAIProvider(api_key=primary_api_key)
-            self.provider_manager.add_provider("openai", openai_provider)
-
-        if claude_api_key:
-            try:
-                claude_provider = ClaudeProvider(api_key=claude_api_key)
-                self.provider_manager.add_provider("claude", claude_provider)
-            except ImportError as exc:
-                if self.verbose:
-                    self.log.warning("Claude provider not available: %s", exc)
-
-        if not self.provider_manager.providers:
-            raise ValueError("At least one API key must be provided for the selected provider(s)")
+        # OpenRouter is the only provider - universal access to all models
+        openrouter_provider = OpenRouterProvider(api_key=final_api_key)
+        self.provider_manager.add_provider("openrouter", openrouter_provider)
+        self.provider_manager.add_provider("openai", openrouter_provider)  # For backward compat with openai: prefix
+        self.provider_manager.add_provider("claude", openrouter_provider)  # For backward compat with claude: prefix
+        
+        if self.verbose:
+            self.log.info("✅ OpenRouter provider registered (universal access)")
+            self.log.info("   - All models: gpt-*, claude-*, llama-*, mistral-*, etc.")
+            self.log.info("   - Extended 1M context for Claude Sonnet 4/4.5")
+            self.log.info("   - Native reasoning for o-series, gpt-5, Claude")
+            self.log.info("   - Configure BYOK: https://openrouter.ai/keys")
 
         self.tool_manager = ToolManager(self)
         self.chat_flow = ChatFlow(
@@ -326,6 +330,17 @@ class UltraGPT:
 
         base_messages = self._ensure_lc_messages(messages)
 
+        # Check if model supports native thinking - if yes, skip fake deepthink pipeline
+        native_thinking_supported = self.provider_manager.does_support_thinking(model)
+        if native_thinking_supported and reasoning_pipeline:
+            if self.verbose:
+                self.log.info("🧠 Model supports native thinking - using native reasoning instead of fake pipeline")
+            # Turn off fake pipeline, will use deepthink=True in final call
+            reasoning_pipeline = False
+            use_native_thinking = True
+        else:
+            use_native_thinking = False
+
         if self.verbose:
             self.log.debug("=" * 50)
             self.log.debug("Starting Chat Session")
@@ -333,6 +348,8 @@ class UltraGPT:
             self.log.debug("Schema: %s", schema)
             self.log.debug("Model: %s", model)
             self.log.debug("Tools: %s", ", ".join(tools) if tools else "None")
+            if native_thinking_supported:
+                self.log.debug("Native Thinking: %s", "Enabled" if use_native_thinking else "Available")
             self.log.debug("=" * 50)
         else:
             self.log.info("Starting chat session")
@@ -343,6 +360,9 @@ class UltraGPT:
         steps_output: Dict[str, Any] = {"steps": [], "conclusion": ""}
         steps_tokens = 0
         steps_tools_used: List[Dict[str, Any]] = []
+
+        reasoning_usage: Dict[str, Any] = {}
+        steps_usage: Dict[str, Any] = {}
 
         if reasoning_pipeline or steps_pipeline:
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -391,10 +411,12 @@ class UltraGPT:
                         reasoning_output = result
                         reasoning_tokens = tokens
                         reasoning_tools_used = details.get("tools_used", [])
+                        reasoning_usage = details.get("usage", {}) or {}
                     else:
                         steps_output = result
                         steps_tokens = tokens
                         steps_tools_used = details.get("tools_used", [])
+                        steps_usage = details.get("usage", {}) or {}
 
         conclusion = steps_output.get("conclusion", "")
         steps_list = steps_output.get("steps", [])
@@ -407,7 +429,8 @@ class UltraGPT:
         if combined_prompt:
             final_messages = add_message_before_system(final_messages, HumanMessage(content=combined_prompt))
 
-        final_deepthink = bool(reasoning_pipeline)
+        # Use native thinking if supported, otherwise use fake deepthink from pipeline
+        final_deepthink = use_native_thinking or bool(reasoning_pipeline)
         if schema:
             final_output, tokens, final_details = self.chat_with_model_parse(
                 final_messages,
@@ -436,6 +459,8 @@ class UltraGPT:
             steps_list.append(conclusion)
 
         all_tools_used = reasoning_tools_used + steps_tools_used + final_details.get("tools_used", [])
+        
+        # Build details dict with token breakdown and usage details
         details_dict = {
             "reasoning": reasoning_output,
             "steps": steps_list,
@@ -443,7 +468,36 @@ class UltraGPT:
             "steps_tokens": steps_tokens,
             "final_tokens": tokens,
             "tools_used": all_tools_used,
+            # Merge in usage details (input/output/reasoning tokens from API)
+            "input_tokens": final_details.get("input_tokens", 0),
+            "output_tokens": final_details.get("output_tokens", 0),
+            "total_tokens": final_details.get("total_tokens", 0),
+            "reasoning_tokens_api": final_details.get("reasoning_tokens", 0),  # From API response
+            "reasoning_text": final_details.get("reasoning_text"),
         }
+
+        # Surface pipeline-specific token metrics without colliding with native API counts
+        details_dict["reasoning_pipeline_tokens"] = reasoning_tokens
+        details_dict["reasoning_pipeline_input_tokens"] = int(reasoning_usage.get("input_tokens", 0))
+        details_dict["reasoning_pipeline_output_tokens"] = int(reasoning_usage.get("output_tokens", 0))
+        details_dict["reasoning_pipeline_total_tokens"] = int(reasoning_usage.get("total_tokens", reasoning_tokens))
+        details_dict["reasoning_pipeline_reasoning_tokens_api"] = int(
+            reasoning_usage.get("reasoning_tokens_api", 0)
+        )
+        if reasoning_usage.get("reasoning_texts"):
+            details_dict["reasoning_pipeline_reasoning_texts"] = reasoning_usage.get("reasoning_texts")
+            details_dict.setdefault("reasoning_text", reasoning_usage.get("reasoning_text"))
+
+        details_dict["steps_pipeline_tokens"] = steps_tokens
+        details_dict["steps_pipeline_input_tokens"] = int(steps_usage.get("input_tokens", 0))
+        details_dict["steps_pipeline_output_tokens"] = int(steps_usage.get("output_tokens", 0))
+        details_dict["steps_pipeline_total_tokens"] = int(steps_usage.get("total_tokens", steps_tokens))
+        details_dict["steps_pipeline_reasoning_tokens_api"] = int(
+            steps_usage.get("reasoning_tokens_api", 0)
+        )
+        if steps_usage.get("reasoning_texts"):
+            details_dict["steps_pipeline_reasoning_texts"] = steps_usage.get("reasoning_texts")
+            details_dict.setdefault("reasoning_text", steps_usage.get("reasoning_text"))
         total_tokens = reasoning_tokens + steps_tokens + tokens
 
         if self.verbose:
@@ -503,6 +557,16 @@ class UltraGPT:
 
         base_messages = self._ensure_lc_messages(messages)
         tool_call_messages = integrate_tool_call_prompt(base_messages, tool_prompt)
+
+        # Check if model supports native thinking - if yes, skip fake deepthink pipeline
+        native_thinking_supported = self.provider_manager.does_support_thinking(model)
+        if native_thinking_supported and reasoning_pipeline:
+            if self.verbose:
+                self.log.info("🧠 Model supports native thinking - using native reasoning instead of fake pipeline")
+            reasoning_pipeline = False
+            use_native_thinking = True
+        else:
+            use_native_thinking = False
 
         reasoning_output: List[str] = []
         reasoning_tokens = 0
@@ -573,6 +637,8 @@ class UltraGPT:
             enhanced_messages = append_message_to_system(enhanced_messages, combined_prompt)
 
         parallel_calls = allow_multiple
+        # Use native thinking if supported, otherwise use fake deepthink from pipeline
+        final_deepthink = use_native_thinking or bool(reasoning_pipeline)
         response_message, tokens, final_details = self.chat_flow.chat_with_model_tools(
             enhanced_messages,
             validated_tools,
@@ -583,7 +649,7 @@ class UltraGPT:
             max_tokens=max_tokens,
             input_truncation=input_truncation,
             parallel_tool_calls=parallel_calls,
-            deepthink=bool(reasoning_pipeline),
+            deepthink=final_deepthink,
         )
 
         total_tokens = reasoning_tokens + steps_tokens + tokens
@@ -597,6 +663,12 @@ class UltraGPT:
             "steps_tokens": steps_tokens,
             "final_tokens": tokens,
             "tools_used": all_tools_used,
+            # Merge in usage details (input/output/reasoning tokens from API)
+            "input_tokens": final_details.get("input_tokens", 0),
+            "output_tokens": final_details.get("output_tokens", 0),
+            "total_tokens": final_details.get("total_tokens", 0),
+            "reasoning_tokens_api": final_details.get("reasoning_tokens", 0),  # From API response
+            "reasoning_text": final_details.get("reasoning_text"),
         }
 
         simplified_response: Any

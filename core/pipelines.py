@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+import re
+
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from langchain_core.messages import BaseMessage, SystemMessage
 
@@ -17,6 +19,24 @@ from ..prompts import (
     generate_steps_prompt,
 )
 from .chat_flow import ChatFlow
+
+
+def _canonicalize_thought(text: Any) -> Tuple[str, str]:
+    """Return canonical key and cleaned text for deduping reasoning pipeline thoughts."""
+
+    raw = str(text).strip()
+    if not raw:
+        return "", ""
+
+    # Remove common numbering prefixes like "Thought 1:" or "1." while keeping intent.
+    stripped = re.sub(r"^thought\s*\d+\s*[:.\-\)\]]\s*", "", raw, flags=re.IGNORECASE)
+    stripped = re.sub(r"^[\-\*\(\)\[\]\d\.]+\s*", "", stripped)
+    condensed = re.sub(r"\s+", " ", stripped).strip()
+    if not condensed:
+        return "", ""
+
+    canonical = re.sub(r"[\s.:;\-]+$", "", condensed.lower())
+    return canonical, condensed
 
 
 class PipelineRunner:
@@ -56,6 +76,10 @@ class PipelineRunner:
             self._log.info("Starting steps pipeline")
 
         total_tokens = 0
+        aggregate_input_tokens = 0
+        aggregate_output_tokens = 0
+        aggregate_reasoning_tokens_api = 0
+        reasoning_text_snapshots: List[str] = []
         all_tools_used: List[Dict[str, Any]] = []
 
         messages_no_system = turnoff_system_message(messages)
@@ -72,7 +96,22 @@ class PipelineRunner:
             input_truncation=input_truncation,
             deepthink=deepthink,
         )
-        total_tokens += tokens
+        step_input_tokens = int(steps_details.get("input_tokens", 0))
+        step_output_tokens = int(steps_details.get("output_tokens", 0))
+        step_total_tokens = int(steps_details.get("total_tokens", 0))
+
+        if step_total_tokens <= 0:
+            step_total_tokens = step_input_tokens + step_output_tokens
+        if step_total_tokens <= 0:
+            step_total_tokens = int(tokens)
+
+        aggregate_input_tokens += step_input_tokens
+        aggregate_output_tokens += step_output_tokens
+        aggregate_reasoning_tokens_api += int(steps_details.get("reasoning_tokens", 0))
+        if steps_details.get("reasoning_text"):
+            reasoning_text_snapshots.append(str(steps_details.get("reasoning_text")))
+
+        total_tokens += step_total_tokens
         all_tools_used.extend(steps_details.get("tools_used", []))
 
         steps = steps_json.get("steps", [])
@@ -100,7 +139,22 @@ class PipelineRunner:
             )
             if self._verbose:
                 self._log.debug("Step %d response preview: %s", idx, step_response[:100])
-            total_tokens += tokens
+            step_iter_input = int(step_details.get("input_tokens", 0))
+            step_iter_output = int(step_details.get("output_tokens", 0))
+            step_iter_total = int(step_details.get("total_tokens", 0))
+
+            if step_iter_total <= 0:
+                step_iter_total = step_iter_input + step_iter_output
+            if step_iter_total <= 0:
+                step_iter_total = int(tokens)
+
+            aggregate_input_tokens += step_iter_input
+            aggregate_output_tokens += step_iter_output
+            aggregate_reasoning_tokens_api += int(step_details.get("reasoning_tokens", 0))
+            if step_details.get("reasoning_text"):
+                reasoning_text_snapshots.append(str(step_details.get("reasoning_text")))
+
+            total_tokens += step_iter_total
             all_tools_used.extend(step_details.get("tools_used", []))
             memory.append({"step": step, "answer": step_response})
 
@@ -116,13 +170,42 @@ class PipelineRunner:
             input_truncation=input_truncation,
             deepthink=deepthink,
         )
-        total_tokens += tokens
+        conclusion_input = int(conclusion_details.get("input_tokens", 0))
+        conclusion_output = int(conclusion_details.get("output_tokens", 0))
+        conclusion_total = int(conclusion_details.get("total_tokens", 0))
+
+        if conclusion_total <= 0:
+            conclusion_total = conclusion_input + conclusion_output
+        if conclusion_total <= 0:
+            conclusion_total = int(tokens)
+
+        aggregate_input_tokens += conclusion_input
+        aggregate_output_tokens += conclusion_output
+        aggregate_reasoning_tokens_api += int(conclusion_details.get("reasoning_tokens", 0))
+        if conclusion_details.get("reasoning_text"):
+            reasoning_text_snapshots.append(str(conclusion_details.get("reasoning_text")))
+
+        total_tokens += conclusion_total
         all_tools_used.extend(conclusion_details.get("tools_used", []))
 
         if self._verbose:
             self._log.debug("✓ Steps pipeline completed")
 
-        return {"steps": memory, "conclusion": conclusion}, total_tokens, {"tools_used": all_tools_used}
+        usage_summary: Dict[str, Any] = {
+            "input_tokens": aggregate_input_tokens,
+            "output_tokens": aggregate_output_tokens,
+            "total_tokens": total_tokens,
+            "reasoning_tokens_api": aggregate_reasoning_tokens_api,
+        }
+
+        if reasoning_text_snapshots:
+            usage_summary["reasoning_text"] = reasoning_text_snapshots[-1]
+            usage_summary["reasoning_texts"] = reasoning_text_snapshots
+
+        return {"steps": memory, "conclusion": conclusion}, total_tokens, {
+            "tools_used": all_tools_used,
+            "usage": usage_summary,
+        }
 
     def run_reasoning_pipeline(
         self,
@@ -152,7 +235,12 @@ class PipelineRunner:
 
         total_tokens = 0
         all_thoughts: List[str] = []
+        seen_thoughts: Set[str] = set()
         all_tools_used: List[Dict[str, Any]] = []
+        aggregate_input_tokens = 0
+        aggregate_output_tokens = 0
+        aggregate_reasoning_tokens_api = 0
+        reasoning_text_snapshots: List[str] = []
         messages_no_system = turnoff_system_message(messages)
 
         for iteration in range(reasoning_iterations):
@@ -173,16 +261,62 @@ class PipelineRunner:
                 input_truncation=input_truncation,
                 deepthink=deepthink,
             )
-            total_tokens += tokens
+            iteration_input_tokens = int(iteration_details.get("input_tokens", 0))
+            iteration_output_tokens = int(iteration_details.get("output_tokens", 0))
+            iteration_total_tokens = int(iteration_details.get("total_tokens", 0))
+
+            if iteration_total_tokens <= 0:
+                iteration_total_tokens = iteration_input_tokens + iteration_output_tokens
+            if iteration_total_tokens <= 0:
+                iteration_total_tokens = int(tokens)
+
+            aggregate_input_tokens += iteration_input_tokens
+            aggregate_output_tokens += iteration_output_tokens
+            aggregate_reasoning_tokens_api += int(iteration_details.get("reasoning_tokens", 0))
+            if iteration_details.get("reasoning_text"):
+                reasoning_text_snapshots.append(str(iteration_details.get("reasoning_text")))
+
+            total_tokens += iteration_total_tokens
             all_tools_used.extend(iteration_details.get("tools_used", []))
 
-            new_thoughts = reasoning_json.get("thoughts", [])
-            all_thoughts.extend(new_thoughts)
+            raw_thoughts = reasoning_json.get("thoughts", []) or []
+            sanitized_payload: List[str] = []
+            base_index = len(all_thoughts)
+
+            for thought in raw_thoughts:
+                canonical_key, cleaned_text = _canonicalize_thought(thought)
+                if not canonical_key or canonical_key in seen_thoughts:
+                    continue
+                seen_thoughts.add(canonical_key)
+                sanitized_payload.append(cleaned_text)
+
+            new_thoughts_count = 0
+            if sanitized_payload:
+                numbered_thoughts = [
+                    f"Thought {base_index + idx + 1}: {text}"
+                    for idx, text in enumerate(sanitized_payload)
+                ]
+                new_thoughts_count = len(numbered_thoughts)
+                all_thoughts.extend(numbered_thoughts)
 
             if self._verbose:
-                self._log.debug("Generated %d new thoughts", len(new_thoughts))
+                self._log.debug("Generated %d new thoughts", new_thoughts_count)
 
-        return all_thoughts, total_tokens, {"tools_used": all_tools_used}
+        usage_summary: Dict[str, Any] = {
+            "input_tokens": aggregate_input_tokens,
+            "output_tokens": aggregate_output_tokens,
+            "total_tokens": total_tokens,
+            "reasoning_tokens_api": aggregate_reasoning_tokens_api,
+        }
+
+        if reasoning_text_snapshots:
+            usage_summary["reasoning_text"] = reasoning_text_snapshots[-1]
+            usage_summary["reasoning_texts"] = reasoning_text_snapshots
+
+        return all_thoughts, total_tokens, {
+            "tools_used": all_tools_used,
+            "usage": usage_summary,
+        }
 
     def combine_pipeline_outputs(
         self,

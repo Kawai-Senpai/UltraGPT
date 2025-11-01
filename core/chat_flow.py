@@ -76,7 +76,7 @@ class ChatFlow:
         elif self._verbose:
             self._log.debug("No tool responses needed")
 
-        content, tokens = self._providers.chat_completion(
+        content, tokens, usage_details = self._providers.chat_completion(
             model=model,
             messages=lc_messages,
             temperature=temperature,
@@ -85,7 +85,10 @@ class ChatFlow:
             deepthink=deepthink,
         )
 
-        details_dict = {"tools_used": tool_usage_details}
+        details_dict = {
+            "tools_used": tool_usage_details,
+            **usage_details,  # Merge in input/output/reasoning token details
+        }
         self._log.debug("Response received (tokens: %d)", tokens)
         return content, tokens, details_dict
 
@@ -111,7 +114,7 @@ class ChatFlow:
         if tool_response:
             lc_messages = append_message_to_system(lc_messages, f"Tool Responses:\n{tool_response}")
 
-        content, tokens = self._providers.chat_completion_with_schema(
+        content, tokens, usage_details = self._providers.chat_completion_with_schema(
             model=model,
             messages=lc_messages,
             schema=schema,
@@ -121,7 +124,10 @@ class ChatFlow:
             deepthink=deepthink,
         )
 
-        details_dict = {"tools_used": tool_usage_details}
+        details_dict = {
+            "tools_used": tool_usage_details,
+            **usage_details,  # Merge in input/output/reasoning token details
+        }
         self._log.debug("Parse response received (tokens: %d)", tokens)
         return content, tokens, details_dict
 
@@ -149,7 +155,7 @@ class ChatFlow:
 
         native_tools = self._tools.convert_user_tools_to_native_format(user_tools)
 
-        response_message, tokens = self._providers.chat_completion_with_tools(
+        response_message, tokens, usage_details = self._providers.chat_completion_with_tools(
             model=model,
             messages=lc_messages,
             tools=native_tools,
@@ -160,7 +166,10 @@ class ChatFlow:
             deepthink=deepthink,
         )
 
-        details_dict = {"tools_used": tool_usage_details}
+        details_dict = {
+            "tools_used": tool_usage_details,
+            **usage_details,  # Merge in input/output/reasoning token details
+        }
         self._log.debug("Native tool calling response received (tokens: %d)", tokens)
         return response_message, tokens, details_dict
 

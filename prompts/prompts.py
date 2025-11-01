@@ -35,33 +35,39 @@ Example Output:
 
 def generate_reasoning_prompt(previous_thoughts=None):
     context = f"\nBased on my previous thoughts:\n{str(previous_thoughts)}" if previous_thoughts else ""
-    
-    return f"""You are an expert at careful reasoning and deep thinking.{context}
 
-Let me think about this further...
+    return f"""You are an expert problem solver using a private scratchpad to reason step-by-step.{context}
 
-Rules:
-- Express your thoughts naturally as they come
-- Build upon previous thoughts if they exist
-- Consider multiple aspects simultaneously
-- Show your genuine thinking process
-- No need to structure or analyze - just think
+Private Scratchpad Rules:
+- These notes are never exposed to the user, so do NOT mention secrecy, refusal, policies, or any limitation about sharing thoughts.
+- Think honestly and concretely about the task, performing intermediate calculations, assumptions, and checks.
+- Expand on prior thoughts when present so each new thought advances the solution.
+- Explore alternative approaches, edge cases, and potential pitfalls, then converge on the most promising plan.
+- Avoid filler, apologies, or meta-commentary; focus purely on useful reasoning content.
+- Do not write phrases like "Final answer", "I can't share", or anything that sounds like a public response; this is internal analysis only.
 
-What your thoughts must follow / focus on:
-- Your thoughts must move towards solving the problem or answering the question at hand. You need to brainstorm and think out loud.
-- You must bran storm through multiple possible solutions and approaches to the problem. You can think about multiple poossible solutions and approaches to the problem. And out put them.
-- You can also think about the possible limitations or challenges that you might face while solving the problem. And how to overcome them.
-- You can reiterate rules, directions and instructions that you have been given so far. But only how it effects your thoughts and your ability to solve the problem. And what you should do.
-- If your previous thoughts were of, let's say 'thinking of doing X', you can think of 'how to do X' or straight up 'do X' and output the result in your thoughts.
-- You can also use tools if provided to you.
-- The goal of this is to expose as much possible reasons, thoughts, ideas, approaches, solutions, limitations, challenges and anything else that you can think of that might help you to solve the problem or answer the question at hand. This may also contain multiple solution itself!
+Focus Areas:
+- Brainstorm multiple solution paths or strategies and compare their trade-offs.
+- Identify requirements, constraints, risks, and the data you still need.
+- When a path seems viable, sketch the concrete steps or sub-calculations required to execute it.
+- Note validations or tests you would run to confirm the result.
+- Reference available tools or resources if they unlock better answers.
 
-Your output should be in JSON format:
+Formatting:
+- Produce 3 to 5 concise thought entries.
+- Each entry must start with "Thought X:" (where X is 1, 2, 3, ...).
+- Each entry should capture a meaningful piece of reasoning such as a sub-problem, calculation, assumption, or validation.
+- Keep the focus on exploration and intermediate logic, not on re-stating the final answer.
+- Vary the content across entries (e.g., consider alternative approaches, sanity checks, tool usage) instead of repeating the same sentence.
+- If you arrive at a conclusion, rewrite it as reasoning steps ("Thought X: Multiply..."), not as a final answer statement.
+- If you detect that two thoughts are identical, revise them so each adds new reasoning signal. (Do not repeat the same thought.)
+
+Your output must be valid JSON. Example:
 {{
     "thoughts": [
-        "Hmm, this makes me think...",
-        "And that leads me to consider...",
-        "Which reminds me of..."
+        "Thought 1: Convert 20% to decimal (0.2) so multiplication is straightforward.",
+        "Thought 2: Multiply 0.2 by 150 to produce 30 and note units remain consistent.",
+        "Thought 3: Sanity-check by seeing that 10% would be 15, so doubling confirms 30."
     ]
 }}"""
 
@@ -124,7 +130,7 @@ Usage Guide: {tool['usage_guide']}"""
         if 'expert_category' in tool:
             tools_info += f"\nExpert Category: {tool['expert_category']}"
         if 'prerequisites' in tool and tool['prerequisites']:
-            tools_info += f"\nPrerequisites: {', '.join(tool['prerequisites'])}"
+            tools_info += f"\nPrerequisites (Tools): {', '.join(tool['prerequisites'])}"
     
         # Add newline for separation between tools
         tools_info += "\n"

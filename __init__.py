@@ -34,8 +34,8 @@ from .schemas import (
 )
 from .providers import (
     BaseProvider,
-    ClaudeProvider,
-    OpenAIProvider,
+    BaseOpenAICompatibleProvider,
+    OpenRouterProvider,
     ProviderManager,
     is_rate_limit_error,
 )
@@ -53,8 +53,8 @@ __all__ = [
     "PipelineRunner",
     "ToolManager",
     "BaseProvider",
-    "OpenAIProvider",
-    "ClaudeProvider",
+    "BaseOpenAICompatibleProvider",
+    "OpenRouterProvider",
     "ProviderManager",
     "is_rate_limit_error",
     "LangChainTokenLimiter",
