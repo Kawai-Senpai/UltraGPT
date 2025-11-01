@@ -141,6 +141,55 @@ def drop_unresolved_tool_calls_lc(messages: List[BaseMessage], verbose: bool = F
     return cleaned
 
 
+def drop_empty_messages_lc(
+    messages: List[BaseMessage],
+    *,
+    logger: Any = None,
+    verbose: bool = False,
+) -> List[BaseMessage]:
+    """Filter out messages that contain no textual content and no tool usage."""
+
+    if not messages:
+        return []
+
+    cleaned: List[BaseMessage] = []
+    skipped = 0
+
+    for message in messages:
+        content = getattr(message, "content", None)
+
+        keep = False
+        if isinstance(message, AIMessage):
+            has_text = isinstance(content, str) and bool(content.strip())
+            has_payload = content is not None and not isinstance(content, str)
+            has_tools = bool(getattr(message, "tool_calls", []) or [])
+            keep = has_text or has_payload or has_tools
+        elif isinstance(message, ToolMessage):
+            if isinstance(content, str):
+                keep = bool(content.strip())
+            else:
+                keep = content is not None
+        else:
+            if isinstance(content, str):
+                keep = bool(content.strip())
+            else:
+                keep = content is not None
+
+        if keep:
+            cleaned.append(message)
+            continue
+
+        skipped += 1
+        if logger is not None:
+            message_type = getattr(message, "type", message.__class__.__name__)
+            logger.warning(f"Skipping empty history message ({message_type})")
+
+    if skipped and logger is not None and verbose:
+        logger.info(f"Removed {skipped} empty message(s) during normalization")
+
+    return cleaned
+
+
 def group_tool_call_pairs_lc(messages: List[BaseMessage]) -> List[List[BaseMessage]]:
     """Group AIMessage with tool_calls and their corresponding ToolMessage results.
     
@@ -203,5 +252,6 @@ __all__ = [
     "concat_messages_safe_lc",
     "filter_messages_safe_lc",
     "drop_unresolved_tool_calls_lc",
+    "drop_empty_messages_lc",
     "group_tool_call_pairs_lc",
 ]

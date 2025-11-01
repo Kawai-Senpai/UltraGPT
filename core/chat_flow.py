@@ -10,6 +10,7 @@ from ..messaging import (
     add_message_before_system,
     append_message_to_system,
     ensure_langchain_messages,
+    drop_empty_messages_lc,
     integrate_tool_call_prompt,
     turnoff_system_message,
 )
@@ -36,7 +37,10 @@ class ChatFlow:
         self._max_tokens = max_tokens
 
     def _ensure_lc_messages(self, messages: List[Any]) -> List[BaseMessage]:
-        return ensure_langchain_messages(messages)
+        lc_messages = ensure_langchain_messages(messages)
+        if not lc_messages:
+            return []
+        return drop_empty_messages_lc(lc_messages, logger=self._log, verbose=self._verbose)
 
     # ------------------------------------------------------------------
     # Core chat flows

@@ -7,6 +7,7 @@ from .history_utils import (
     validate_tool_call_pairing_lc,
     drop_unresolved_tool_calls_lc,
     group_tool_call_pairs_lc,
+    drop_empty_messages_lc,
 )
 from .message_ops import (
     add_message_before_system,
@@ -30,6 +31,7 @@ __all__ = [
     "concat_messages_safe_lc",
     "filter_messages_safe_lc",
     "drop_unresolved_tool_calls_lc",
+    "drop_empty_messages_lc",
     "group_tool_call_pairs_lc",
     "remove_orphaned_tool_results",
     "validate_tool_call_pairing",
