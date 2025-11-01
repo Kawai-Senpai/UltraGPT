@@ -1016,10 +1016,10 @@ class ProviderManager:
         return self.providers[name]
 
     def parse_model_string(self, model: str) -> Tuple[str, str]:
-        if ":" in model:
-            provider_name, model_name = model.split(":", 1)
-            return provider_name, model_name
-        return "openai", model
+        cleaned = (model or "").strip()
+        if "/" in cleaned:
+            return "openrouter", cleaned
+        return "openrouter", cleaned
 
     def does_support_thinking(self, model: str) -> bool:
         """Check if the model supports native reasoning/thinking capabilities.

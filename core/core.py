@@ -102,8 +102,6 @@ class UltraGPT:
         # OpenRouter is the only provider - universal access to all models
         openrouter_provider = OpenRouterProvider(api_key=final_api_key)
         self.provider_manager.add_provider("openrouter", openrouter_provider)
-        self.provider_manager.add_provider("openai", openrouter_provider)  # For backward compat with openai: prefix
-        self.provider_manager.add_provider("claude", openrouter_provider)  # For backward compat with claude: prefix
         
         if self.verbose:
             self.log.info("✅ OpenRouter provider registered (universal access)")
