@@ -120,9 +120,9 @@ def generate_tool_call_prompt(user_tools: list, allow_multiple: bool = True) -> 
     tools_info = ""
     for tool in user_tools:
         # Build tool info with support for both UserTool and ExpertTool
+        # Note: Description is already sent via native tool format, no need to repeat here
         tools_info += f"""
 Tool: {tool['name']}
-Description: {tool['description']}
 When to use: {tool['when_to_use']}
 Usage Guide: {tool['usage_guide']}"""
         
