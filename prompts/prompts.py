@@ -142,8 +142,9 @@ Usage Guide: {tool['usage_guide']}"""
 
 Tool Instructions:
 - {multiple_instruction}
-- Use 'stop_after_tool_call' param only when no more tool calls are needed.
-- It ends the session immediately and you will not see the tool’s result, so only use it after you have seen the results and are sure."""
+- Use 'stop_after_tool_call' param only when no more tool calls are needed. It ends the session immediately and you will not see the tool’s result, so only use it after you have seen the results and are sure.
+- When you call tools, follow each tool’s input_schema exactly. For example, to emit a JSON integer, not a string. Use {{"index": 4}} and never {{"index": "4"}}
+"""
 
 def generate_single_tool_call_prompt(user_tools: list) -> str:
     """Generate prompt for single tool calling"""
