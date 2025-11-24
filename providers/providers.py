@@ -770,6 +770,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "anthropic/claude-opus",  # Claude Opus family supports reasoning tokens
         "deepseek/deepseek-chat",  # DeepSeek v3.1 exposes reasoning traces via effort flag
         "x-ai/grok-4",  # Grok 4 always returns reasoning traces
+        "google/gemini-3-pro-preview",  # Gemini 3 Pro Preview exposes reasoning tokens via OpenRouter
     ]
     
     # Models that DON'T support native structured output via LangChain's with_structured_output
@@ -798,12 +799,21 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "claude-3.5-haiku": "anthropic/claude-3.5-haiku",
         "claude-3-5-haiku": "anthropic/claude-3.5-haiku",
         "claude-3-haiku": "anthropic/claude-3-haiku",
+        # GPT models (explicit GPT-5.1 mappings)
+        "gpt-5.1": "openai/gpt-5.1",
+        "gpt-5.1-chat": "openai/gpt-5.1-chat",
+        "gpt5.1": "openai/gpt-5.1",
+        "gpt5.1-chat": "openai/gpt-5.1-chat",
         # GPT models pass through as-is
         # Gemini models
         "gemini-2.5-pro": "google/gemini-2.5-pro",
         "gemini-pro-2.5": "google/gemini-2.5-pro",
         "gemini-pro": "google/gemini-2.5-pro",
         "gemini25pro": "google/gemini-2.5-pro",
+        "gemini-3-pro-preview": "google/gemini-3-pro-preview",
+        "gemini-3-pro": "google/gemini-3-pro-preview",
+        "gemini3-pro-preview": "google/gemini-3-pro-preview",
+        "gemini3pro": "google/gemini-3-pro-preview",
         # Grok models
         "grok-4": "x-ai/grok-4",
         # DeepSeek models
@@ -831,6 +841,10 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "gpt-5-pro": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "gpt-5-mini": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "gpt-5-nano": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "gpt-5.1": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "openai/gpt-5.1": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "gpt-5.1-chat": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "openai/gpt-5.1-chat": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "gpt-5-chat-latest": {"max_input_tokens": 128000, "max_output_tokens": 16384},
         "gpt-4.1": {"max_input_tokens": 1_000_000, "max_output_tokens": 32768},
         "gpt-4.1-mini": {"max_input_tokens": 1_000_000, "max_output_tokens": 32768},
@@ -851,6 +865,8 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         # Gemini models
         "gemini-2.5-pro": {"max_input_tokens": 1_048_576, "max_output_tokens": 65535},
         "google/gemini-2.5-pro": {"max_input_tokens": 1_048_576, "max_output_tokens": 65535},
+        "gemini-3-pro-preview": {"max_input_tokens": 1_048_576, "max_output_tokens": 65536},
+        "google/gemini-3-pro-preview": {"max_input_tokens": 1_048_576, "max_output_tokens": 65536},
 
         # Grok model
         "grok-4": {"max_input_tokens": 256_000, "max_output_tokens": 32768},
@@ -898,7 +914,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
             "haiku": "anthropic/claude-3-haiku",
             "sonnet": "anthropic/claude-3.7-sonnet",
             "opus": "anthropic/claude-opus-4",
-            "gemini": "google/gemini-2.5-pro",
+            "gemini": "google/gemini-3-pro-preview",
             "grok": "x-ai/grok-4",
             "deepseek": "deepseek/deepseek-chat-v3.1",
         }
