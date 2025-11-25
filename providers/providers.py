@@ -791,6 +791,9 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "claude-sonnet-4.5": "anthropic/claude-sonnet-4.5",
         "claude-sonnet-4-5": "anthropic/claude-sonnet-4.5",
         "claude-sonnet-4": "anthropic/claude-sonnet-4",
+        # Opus models (200k context)
+        "claude-opus-4.5": "anthropic/claude-opus-4.5",
+        "claude-opus-4-5": "anthropic/claude-opus-4.5",
         "claude-opus-4.1": "anthropic/claude-opus-4.1",
         "claude-opus-4-1": "anthropic/claude-opus-4.1",
         "claude-opus-4": "anthropic/claude-opus-4",
@@ -828,6 +831,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "claude-sonnet-4": {"max_input_tokens": 1_000_000, "max_output_tokens": 64000},
 
         # 200k context for other Claude models
+        "claude-opus-4.5": {"max_input_tokens": 200_000, "max_output_tokens": 32000},
         "claude-opus-4.1": {"max_input_tokens": 200_000, "max_output_tokens": 32000},
         "claude-opus-4": {"max_input_tokens": 200_000, "max_output_tokens": 32000},
         "claude-3.7-sonnet": {"max_input_tokens": 200_000, "max_output_tokens": 64000},
