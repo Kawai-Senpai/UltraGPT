@@ -819,6 +819,8 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "gemini3pro": "google/gemini-3-pro-preview",
         # Grok models
         "grok-4": "x-ai/grok-4",
+        "grok-4.1-fast": "x-ai/grok-4.1-fast",
+        "grok-4-1-fast": "x-ai/grok-4.1-fast",
         # DeepSeek models
         "deepseek-chat-v3.1": "deepseek/deepseek-chat-v3.1",
         "deepseek-v3.1": "deepseek/deepseek-chat-v3.1",
@@ -875,6 +877,9 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         # Grok model
         "grok-4": {"max_input_tokens": 256_000, "max_output_tokens": 32768},
         "x-ai/grok-4": {"max_input_tokens": 256_000, "max_output_tokens": 32768},
+        # Grok 4.1 Fast (2M context, ~30k output as per xAI/OpenRouter docs)
+        "grok-4.1-fast": {"max_input_tokens": 2_000_000, "max_output_tokens": 30_000},
+        "x-ai/grok-4.1-fast": {"max_input_tokens": 2_000_000, "max_output_tokens": 30_000},
 
         # DeepSeek model
         "deepseek-chat-v3.1": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
