@@ -821,6 +821,10 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "grok-4": "x-ai/grok-4",
         "grok-4.1-fast": "x-ai/grok-4.1-fast",
         "grok-4-1-fast": "x-ai/grok-4.1-fast",
+        # Qwen models
+        "qwen3-vl-235b-a22b-instruct": "qwen/qwen3-vl-235b-a22b-instruct",
+        "qwen3-vl-235b-instruct": "qwen/qwen3-vl-235b-a22b-instruct",
+        "qwen3-vl-235b": "qwen/qwen3-vl-235b-a22b-instruct",
         # DeepSeek models
         "deepseek-chat-v3.1": "deepseek/deepseek-chat-v3.1",
         "deepseek-v3.1": "deepseek/deepseek-chat-v3.1",
@@ -880,6 +884,10 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         # Grok 4.1 Fast (2M context, ~30k output as per xAI/OpenRouter docs)
         "grok-4.1-fast": {"max_input_tokens": 2_000_000, "max_output_tokens": 30_000},
         "x-ai/grok-4.1-fast": {"max_input_tokens": 2_000_000, "max_output_tokens": 30_000},
+
+        # Qwen3 VL (per OpenRouter listing ~131k context; keep output conservative until verified)
+        "qwen3-vl-235b-a22b-instruct": {"max_input_tokens": 131_072, "max_output_tokens": 8_192},
+        "qwen/qwen3-vl-235b-a22b-instruct": {"max_input_tokens": 131_072, "max_output_tokens": 8_192},
 
         # DeepSeek model
         "deepseek-chat-v3.1": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
