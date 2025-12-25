@@ -667,13 +667,24 @@ class UltraGPT:
             "total_tokens": final_details.get("total_tokens", 0),
             "reasoning_tokens_api": final_details.get("reasoning_tokens", 0),  # From API response
             "reasoning_text": final_details.get("reasoning_text"),
+            # Include reasoning_details for tool call continuity (OpenRouter normalized format)
+            "reasoning_details": final_details.get("reasoning_details") or response_message.get("reasoning_details"),
         }
 
         simplified_response: Any
         if response_message.get("tool_calls"):
-            simplified_response = response_message.get("tool_calls")
-            if not allow_multiple and simplified_response:
-                simplified_response = simplified_response[0]
+            # For tool calls, attach reasoning_details so it can be stored in history
+            simplified_response = {
+                "tool_calls": response_message.get("tool_calls"),
+            }
+            if response_message.get("reasoning_details"):
+                simplified_response["reasoning_details"] = response_message["reasoning_details"]
+            # Return just the tool_calls array if allow_multiple, else first tool call
+            if allow_multiple:
+                simplified_response = simplified_response["tool_calls"]
+                # Note: reasoning_details will be in details_dict, not simplified_response
+            else:
+                simplified_response = simplified_response["tool_calls"][0] if simplified_response["tool_calls"] else None
         else:
             content = response_message.get("content")
             simplified_response = {"content": content} if content and str(content).strip() else None

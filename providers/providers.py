@@ -12,6 +12,7 @@ output also streams and still returns parsed JSON plus usage metadata.
 
 from __future__ import annotations
 
+import httpx
 import importlib
 import json
 import logging
@@ -23,9 +24,8 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pydantic import BaseModel
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
 
 from .. import config
 from ..schemas import prepare_schema_for_openai, sanitize_tool_parameters_schema
@@ -170,6 +170,112 @@ def retry_on_rate_limit(func):
         raise Exception("Maximum retries exceeded for rate limit")
 
     return wrapper
+
+
+# ============================================================================
+# Prompt Caching Support
+# ============================================================================
+
+# Models that require explicit cache_control markers (others auto-cache)
+EXPLICIT_CACHE_MODELS = [
+    "anthropic/claude",  # All Claude models via OpenRouter need explicit cache_control
+]
+
+# Default cache TTL for explicit caching (1 hour for long agent sessions)
+DEFAULT_CACHE_TTL = "1h"
+
+
+def _needs_explicit_caching(model: str) -> bool:
+    """Check if model requires explicit cache_control markers.
+    
+    Claude models need explicit cache_control, while OpenAI and others auto-cache
+    when the prefix is stable and > 1024 tokens.
+    """
+    model_lower = model.lower()
+    return any(prefix in model_lower for prefix in EXPLICIT_CACHE_MODELS)
+
+
+def _apply_prompt_caching(
+    messages: List[BaseMessage],
+    model: str,
+    *,
+    cache_ttl: str = DEFAULT_CACHE_TTL,
+    enable_caching: bool = True,
+) -> List[BaseMessage]:
+    """Apply prompt caching optimizations to message list.
+    
+    For Claude models: Converts system message content to multipart format
+    with cache_control marker on the final block.
+    
+    For other models (OpenAI, Gemini): No changes needed, they auto-cache.
+    
+    Args:
+        messages: List of LangChain messages (already consolidated)
+        model: Model name to determine caching strategy
+        cache_ttl: Cache time-to-live (default "1h", or "5m" for 5 minutes)
+        enable_caching: Set to False to disable caching modifications
+        
+    Returns:
+        Modified messages with caching optimizations applied
+    """
+    if not enable_caching or not messages:
+        return messages
+    
+    # Only apply explicit caching for Claude models
+    if not _needs_explicit_caching(model):
+        # OpenAI and others auto-cache stable prefixes, no modification needed
+        return messages
+    
+    # Find the system message (should be exactly one after consolidation)
+    system_idx = None
+    for idx, msg in enumerate(messages):
+        if isinstance(msg, SystemMessage):
+            system_idx = idx
+            break
+    
+    if system_idx is None:
+        # No system message found, return unchanged
+        return messages
+    
+    system_msg = messages[system_idx]
+    content = system_msg.content
+    
+    # Convert content to multipart format with cache_control
+    if isinstance(content, str):
+        # Single string content -> convert to list with cache_control on last block
+        new_content = [
+            {
+                "type": "text",
+                "text": content,
+                "cache_control": {"type": "ephemeral", "ttl": cache_ttl}
+            }
+        ]
+    elif isinstance(content, list):
+        # Already multipart - add cache_control to last text block
+        new_content = []
+        last_text_idx = None
+        for i, block in enumerate(content):
+            if isinstance(block, dict) and block.get("type") == "text":
+                last_text_idx = i
+            new_content.append(dict(block) if isinstance(block, dict) else block)
+        
+        if last_text_idx is not None and isinstance(new_content[last_text_idx], dict):
+            # Add cache_control to the last text block
+            new_content[last_text_idx]["cache_control"] = {"type": "ephemeral", "ttl": cache_ttl}
+    else:
+        # Unknown format, return unchanged
+        return messages
+    
+    # Create new system message with cached content
+    new_system = SystemMessage(content=new_content)
+    
+    # Replace the old system message
+    result = list(messages)
+    result[system_idx] = new_system
+    
+    logger.debug("Applied prompt caching to system message for model %s with TTL %s", model, cache_ttl)
+    return result
+
 
 class BaseProvider:
     """Abstract provider contract."""
@@ -327,6 +433,22 @@ class BaseOpenAICompatibleProvider(BaseProvider):
 
         # Stream usage for token tracking
         kwargs["stream_usage"] = True
+        
+        # Add HTTP timeouts to prevent hung connections
+        # Use request_timeout (LangChain's standard parameter name)
+        # - connect: 10s to establish connection
+        # - read: 180s between chunks (allows for long thinking with keepalives)
+        # - write: 60s to send request
+        # - pool: 10s to acquire connection from pool
+        kwargs["request_timeout"] = httpx.Timeout(
+            connect=10.0,
+            read=180.0,  # 3 minutes - allows for reasoning model "thinking" with keepalives
+            write=60.0,
+            pool=10.0,
+        )
+        
+        # Add retry configuration for transient failures
+        kwargs["max_retries"] = 2
 
         # Merge extra kwargs
         if extra_kwargs:
@@ -354,33 +476,280 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         return None
 
     @staticmethod
-    def _accumulate_stream(stream_iter) -> AIMessageChunk:
-        """Merge AIMessageChunk pieces yielded by llm.stream."""
-        first: Optional[AIMessageChunk] = None
-        try:
-            first = next(stream_iter)
-        except StopIteration:
-            return AIMessageChunk(content="")
-        aggregate = first
-        for chunk in stream_iter:
-            aggregate += chunk
-        return aggregate
+    def _safe_close_stream(stream_iter) -> None:
+        """Safely close a stream iterator to prevent connection pool leaks.
+        
+        This is critical for httpx connection pooling - streams MUST be closed
+        properly or connections leak and the pool gets exhausted.
+        """
+        close_fn = getattr(stream_iter, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception:  # noqa: BLE001
+                pass  # Best effort - don't crash on cleanup failures
+        
+        # Also try to close underlying response if available (prevents pool leaks)
+        # Some stream wrappers expose .response attribute
+        response = getattr(stream_iter, "response", None)
+        if response is not None:
+            aclose = getattr(response, "aclose", None)
+            close = getattr(response, "close", None)
+            try:
+                if callable(aclose):
+                    # For async streams in sync context, try sync close first
+                    pass  # aclose is async, can't call from sync
+                if callable(close):
+                    close()
+            except Exception:  # noqa: BLE001
+                pass
 
     @staticmethod
-    def _accumulate_structured_stream(stream_iter) -> Any:
-        """Collect and merge all chunks from structured_llm.stream."""
+    def _accumulate_stream(
+        stream_iter,
+        *,
+        max_wall_time_seconds: float = 3600.0,  # 1 hour default hard limit
+    ) -> AIMessageChunk:
+        """Merge AIMessageChunk pieces yielded by llm.stream.
+        
+        Features:
+        - Wall-clock deadline to prevent infinite hanging (default 1 hour)
+        - Mid-stream error detection for OpenRouter SSE errors
+        - Proper stream cleanup in finally block
+        - Manual accumulation of additional_kwargs (reasoning_details, etc.)
+        
+        LangChain's AIMessageChunk.__add__ doesn't properly accumulate additional_kwargs,
+        so we manually collect and merge them from all chunks. This ensures future-proof
+        capture of any extra fields from OpenRouter/models.
+        
+        Args:
+            stream_iter: The stream iterator from llm.stream()
+            max_wall_time_seconds: Maximum total time allowed (default 3600s = 1 hour)
+            
+        Raises:
+            TimeoutError: If wall-clock deadline exceeded
+            RuntimeError: If mid-stream error detected from provider
+        """
+        import time
+        start_time = time.monotonic()
+        
+        # Track all additional_kwargs because LangChain's __add__ doesn't accumulate them
+        # For list fields like reasoning_details, we use UPSERT/MERGE to handle streaming
+        # For scalar fields like reasoning, we keep the last non-None value
+        accumulated_kwargs: Dict[str, Any] = {}
+        
+        # Index maps for list fields - allows O(1) lookup for merging
+        # Key: field name, Value: dict mapping (type, index, id) -> item reference
+        list_field_indexes: Dict[str, Dict[tuple, dict]] = {}
+        
+        # Fields that are lists and need special accumulation with UPSERT
+        LIST_FIELDS = {'reasoning_details'}
+
+        def _merge_streamed_text(existing: str, incoming: str) -> str:
+            """Merge streamed text fragments in a version/provider-tolerant way.
+
+            Providers differ in whether they stream cumulative text (each chunk repeats
+            the full prefix) or incremental fragments. We support both:
+            - If incoming extends existing, take incoming.
+            - If existing extends incoming, keep existing.
+            - Otherwise, append incoming.
+            """
+            if not existing:
+                return incoming
+            if not incoming:
+                return existing
+            if incoming == existing:
+                return existing
+            if incoming.startswith(existing):
+                return incoming
+            if existing.startswith(incoming):
+                return existing
+            if existing.endswith(incoming):
+                return existing
+            if incoming.endswith(existing):
+                return incoming
+            return existing + incoming
+        
+        def accumulate_kwargs(chunk_kwargs: Dict[str, Any]) -> None:
+            """Accumulate additional_kwargs from a chunk using UPSERT/MERGE.
+            
+            For list fields like reasoning_details, this uses UPSERT instead of
+            simple deduplication. This is critical because:
+            - Streaming may send the same item multiple times with more fields
+            - First chunk: {"type": "reasoning.summary", "id": "rs_123"}
+            - Later chunk: {"type": "reasoning.summary", "id": "rs_123", "data": "encrypted..."}
+            - We need to MERGE the later chunk's fields into the existing item
+            """
+            if not chunk_kwargs:
+                return
+            
+            for key, value in chunk_kwargs.items():
+                if value is None:
+                    continue
+                    
+                if key in LIST_FIELDS and isinstance(value, list):
+                    # Initialize list and index if needed
+                    if key not in accumulated_kwargs:
+                        accumulated_kwargs[key] = []
+                        list_field_indexes[key] = {}
+                    
+                    index_map = list_field_indexes[key]
+                    
+                    for item in value:
+                        if isinstance(item, dict):
+                            # Create a key for this item
+                            # Note: OpenRouter/OpenAI-style reasoning blocks may stream
+                            # partial fragments over time (especially `reasoning.summary`).
+                            # Using (type, index) is more robust than including `id`,
+                            # because `id` can be missing in early chunks.
+                            item_key = (item.get('type'), item.get('index', 0))
+                            
+                            existing_item = index_map.get(item_key)
+                            if existing_item is None:
+                                # New item - add to list and index
+                                accumulated_kwargs[key].append(item)
+                                index_map[item_key] = item
+                            else:
+                                # UPSERT: Merge new non-None fields into existing item
+                                # This captures fields like 'data' that may come in later chunks
+                                for k, v in item.items():
+                                    if v is not None:
+                                        # Some fields can be streamed as fragments (e.g., summary/data).
+                                        if k in {"summary", "data"} and isinstance(v, str):
+                                            current = existing_item.get(k)
+                                            if isinstance(current, str):
+                                                existing_item[k] = _merge_streamed_text(current, v)
+                                            else:
+                                                existing_item[k] = v
+                                        else:
+                                            existing_item[k] = v
+                        else:
+                            # Non-dict items, just append if not duplicate
+                            if item not in accumulated_kwargs[key]:
+                                accumulated_kwargs[key].append(item)
+                else:
+                    # Scalar fields: keep last non-None value
+                    accumulated_kwargs[key] = value
+        
+        first: Optional[AIMessageChunk] = None
+        try:
+            try:
+                first = next(stream_iter)
+            except StopIteration:
+                return AIMessageChunk(content="")
+            
+            # Check for mid-stream error in first chunk
+            BaseOpenAICompatibleProvider._check_for_stream_error(first)
+            
+            # Capture additional_kwargs from first chunk
+            if hasattr(first, 'additional_kwargs') and first.additional_kwargs:
+                accumulate_kwargs(first.additional_kwargs)
+            
+            aggregate = first
+            for chunk in stream_iter:
+                # Wall-clock deadline check
+                elapsed = time.monotonic() - start_time
+                if elapsed > max_wall_time_seconds:
+                    logger.warning(
+                        "Stream exceeded wall-clock deadline of %.0fs (elapsed: %.0fs), aborting",
+                        max_wall_time_seconds,
+                        elapsed
+                    )
+                    raise TimeoutError(
+                        f"Stream exceeded maximum wall-clock time of {max_wall_time_seconds}s"
+                    )
+                
+                # Check for mid-stream error
+                BaseOpenAICompatibleProvider._check_for_stream_error(chunk)
+                
+                # Capture additional_kwargs from this chunk before merging
+                if hasattr(chunk, 'additional_kwargs') and chunk.additional_kwargs:
+                    accumulate_kwargs(chunk.additional_kwargs)
+                
+                aggregate += chunk
+            
+            # Inject accumulated kwargs into final aggregate
+            if accumulated_kwargs:
+                if not hasattr(aggregate, 'additional_kwargs') or not aggregate.additional_kwargs:
+                    aggregate.additional_kwargs = {}
+                aggregate.additional_kwargs.update(accumulated_kwargs)
+            
+            return aggregate
+        finally:
+            # Always close stream to return connection to pool
+            BaseOpenAICompatibleProvider._safe_close_stream(stream_iter)
+
+    @staticmethod
+    def _check_for_stream_error(chunk: AIMessageChunk) -> None:
+        """Check if a stream chunk contains an error from the provider.
+        
+        OpenRouter can send errors mid-stream as SSE events with finish_reason: "error"
+        even though HTTP status is 200 OK.
+        """
+        # Check response_metadata for finish_reason
+        response_meta = getattr(chunk, "response_metadata", None) or {}
+        finish_reason = response_meta.get("finish_reason")
+        
+        if finish_reason == "error":
+            error_info = response_meta.get("error", {})
+            error_msg = error_info.get("message", "Unknown stream error from provider")
+            error_code = error_info.get("code", "STREAM_ERROR")
+            logger.error("Mid-stream error detected: %s (code: %s)", error_msg, error_code)
+            raise RuntimeError(f"Provider stream error: {error_msg} (code: {error_code})")
+        
+        # Also check additional_kwargs for errors
+        additional = getattr(chunk, "additional_kwargs", None) or {}
+        if additional.get("error"):
+            error_info = additional["error"]
+            if isinstance(error_info, dict):
+                error_msg = error_info.get("message", str(error_info))
+            else:
+                error_msg = str(error_info)
+            logger.error("Mid-stream error in additional_kwargs: %s", error_msg)
+            raise RuntimeError(f"Provider stream error: {error_msg}")
+
+    @staticmethod
+    def _accumulate_structured_stream(
+        stream_iter,
+        *,
+        max_wall_time_seconds: float = 3600.0,  # 1 hour default hard limit
+    ) -> Any:
+        """Collect and merge all chunks from structured_llm.stream.
+        
+        Features:
+        - Wall-clock deadline to prevent infinite hanging (default 1 hour)
+        - Proper stream cleanup in finally block
+        """
+        import time
+        start_time = time.monotonic()
+        
         result: Dict[str, Any] = {}
-        for item in stream_iter:
-            if isinstance(item, dict):
-                logger.debug(f"Structured stream chunk keys: {list(item.keys())}")
-                result.update(item)
-                if "parsed" in item:
-                    logger.debug(f"Parsed data type: {type(item.get('parsed'))}")
-                if "raw" in item:
-                    raw_msg = item.get("raw")
-                    usage = getattr(raw_msg, "usage_metadata", None)
-                    logger.debug(f"Raw message usage_metadata: {usage}")
-        return result if result else None
+        try:
+            for item in stream_iter:
+                # Wall-clock deadline check
+                elapsed = time.monotonic() - start_time
+                if elapsed > max_wall_time_seconds:
+                    logger.warning(
+                        "Structured stream exceeded wall-clock deadline of %.0fs, aborting",
+                        max_wall_time_seconds
+                    )
+                    raise TimeoutError(
+                        f"Structured stream exceeded maximum wall-clock time of {max_wall_time_seconds}s"
+                    )
+                
+                if isinstance(item, dict):
+                    logger.debug(f"Structured stream chunk keys: {list(item.keys())}")
+                    result.update(item)
+                    if "parsed" in item:
+                        logger.debug(f"Parsed data type: {type(item.get('parsed'))}")
+                    if "raw" in item:
+                        raw_msg = item.get("raw")
+                        usage = getattr(raw_msg, "usage_metadata", None)
+                        logger.debug(f"Raw message usage_metadata: {usage}")
+            return result if result else None
+        finally:
+            # Always close stream to return connection to pool
+            BaseOpenAICompatibleProvider._safe_close_stream(stream_iter)
 
     @staticmethod
     def _usage_total_tokens_from_message(msg: Union[AIMessage, AIMessageChunk, None]) -> int:
@@ -467,13 +836,16 @@ class BaseOpenAICompatibleProvider(BaseProvider):
                 details["output_tokens"] = int(usage.get("completion_tokens", 0))
                 details["total_tokens"] = int(usage.get("total_tokens", 0))
 
-        # Try to extract reasoning text if available (from message content or metadata)
-        # Some models may return reasoning in special format
+        # Try to extract reasoning text and reasoning_details if available
+        # reasoning_details is the normalized OpenRouter format for reasoning models
         if hasattr(msg, "additional_kwargs"):
             additional = getattr(msg, "additional_kwargs", {}) or {}
-            # Check if there's reasoning content
+            # Check if there's reasoning content (string format)
             if "reasoning" in additional:
                 details["reasoning_text"] = additional.get("reasoning")
+            # Check for reasoning_details array (OpenRouter normalized format)
+            if "reasoning_details" in additional:
+                details["reasoning_details"] = additional.get("reasoning_details")
 
         return details
 
@@ -742,6 +1114,12 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         }
         if normalized_calls:
             response_message["tool_calls"] = normalized_calls
+        
+        # Include reasoning_details if present (for reasoning model continuity)
+        # This is critical for preserving reasoning context across tool call loops
+        additional_kwargs = getattr(final_chunk, "additional_kwargs", {}) or {}
+        if additional_kwargs.get("reasoning_details"):
+            response_message["reasoning_details"] = additional_kwargs["reasoning_details"]
 
         usage_details = self._extract_usage_details(final_chunk)
         return response_message, tokens_used, usage_details
@@ -983,6 +1361,16 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         extra_body: Dict[str, Any] = dict(base_extra)
 
         transformed = self._transform_model_name(model)
+        
+        # For reasoning models, request encrypted content for stateless replay
+        # This ensures the reasoning state is self-contained and doesn't require
+        # server-side storage (fixes "Item with id 'rs_...' not found" errors)
+        is_reasoning = self._does_support_thinking(model)
+        if is_reasoning:
+            # Request encrypted reasoning content for OpenAI/Azure Responses API
+            # This makes the reasoning payload portable without store:true
+            extra_body["include"] = ["reasoning.encrypted_content"]
+        
         needs_max_output_tokens = any(
             transformed.startswith(prefix) for prefix in self.MAX_OUTPUT_TOKEN_MODELS
         )
@@ -1101,6 +1489,7 @@ class ProviderManager:
         *,
         input_truncation: Optional[Union[str, int]],
         keep_newest: bool,
+        enable_caching: bool = True,
     ) -> List[BaseMessage]:
         lc_messages = ensure_langchain_messages(messages)
         cleaned = remove_orphaned_tool_results_lc(lc_messages, verbose=self._verbose)
@@ -1111,6 +1500,12 @@ class ProviderManager:
         # This ensures we truncate with a single system message, not multiple scattered ones
         # Also strips whitespace from all message content (moved inside consolidate function)
         cleaned = consolidate_system_messages_safe(cleaned)
+        
+        # APPLY PROMPT CACHING optimizations
+        # For Claude: converts system message to multipart format with cache_control
+        # For OpenAI/Gemini: no changes needed (auto-caching based on stable prefix)
+        if enable_caching:
+            cleaned = _apply_prompt_caching(cleaned, model_name, enable_caching=True)
 
         setting = input_truncation if input_truncation is not None else self._default_input_truncation
         max_tokens = self._resolve_limit(provider_name, model_name, setting)

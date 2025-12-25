@@ -38,6 +38,15 @@ def _extract_text(content_val: Any) -> str:
 def _build_ai_message(content: Any, message: dict) -> AIMessage:
     text_content = _extract_text(content)
     tool_calls_payload: List[dict] = []
+    
+    # Build additional_kwargs for extra fields like reasoning_details
+    additional_kwargs = {}
+    if message.get("reasoning_details"):
+        additional_kwargs["reasoning_details"] = message["reasoning_details"]
+    if message.get("reasoning"):
+        additional_kwargs["reasoning"] = message["reasoning"]
+    if message.get("refusal"):
+        additional_kwargs["refusal"] = message["refusal"]
 
     for call in message.get("tool_calls") or []:
         call_id = call.get("id") or call.get("tool_call_id")
@@ -64,9 +73,16 @@ def _build_ai_message(content: Any, message: dict) -> AIMessage:
             )
 
     if tool_calls_payload:
-        return AIMessage(content=text_content or "", tool_calls=tool_calls_payload)
+        return AIMessage(
+            content=text_content or "", 
+            tool_calls=tool_calls_payload,
+            additional_kwargs=additional_kwargs if additional_kwargs else {}
+        )
 
-    return AIMessage(content=text_content or "")
+    return AIMessage(
+        content=text_content or "",
+        additional_kwargs=additional_kwargs if additional_kwargs else {}
+    )
 
 
 def _build_tool_message(content: Any, message: dict) -> ToolMessage:
