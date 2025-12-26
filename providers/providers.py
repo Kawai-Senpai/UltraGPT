@@ -539,11 +539,14 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         accumulated_kwargs: Dict[str, Any] = {}
         
         # Index maps for list fields - allows O(1) lookup for merging
-        # Key: field name, Value: dict mapping (type, index, id) -> item reference
+        # Key: field name, Value: dict mapping (kind, type, key) -> item reference
         list_field_indexes: Dict[str, Dict[tuple, dict]] = {}
+        # Track last unkeyed items (missing id/index) by (type, format)
+        list_field_unkeyed: Dict[str, Dict[tuple, Tuple[int, dict]]] = {}
         
         # Fields that are lists and need special accumulation with UPSERT
         LIST_FIELDS = {'reasoning_details'}
+        STREAMED_TEXT_FIELDS = {"summary", "data", "text"}
 
         def _merge_streamed_text(existing: str, incoming: str) -> str:
             """Merge streamed text fragments in a version/provider-tolerant way.
@@ -570,7 +573,7 @@ class BaseOpenAICompatibleProvider(BaseProvider):
                 return incoming
             return existing + incoming
         
-        def accumulate_kwargs(chunk_kwargs: Dict[str, Any]) -> None:
+        def accumulate_kwargs(chunk_kwargs: Dict[str, Any], chunk_id: int) -> None:
             """Accumulate additional_kwargs from a chunk using UPSERT/MERGE.
             
             For list fields like reasoning_details, this uses UPSERT instead of
@@ -592,30 +595,66 @@ class BaseOpenAICompatibleProvider(BaseProvider):
                     if key not in accumulated_kwargs:
                         accumulated_kwargs[key] = []
                         list_field_indexes[key] = {}
+                        list_field_unkeyed[key] = {}
                     
                     index_map = list_field_indexes[key]
+                    unkeyed_map = list_field_unkeyed[key]
                     
                     for item in value:
                         if isinstance(item, dict):
-                            # Create a key for this item
-                            # Note: OpenRouter/OpenAI-style reasoning blocks may stream
-                            # partial fragments over time (especially `reasoning.summary`).
-                            # Using (type, index) is more robust than including `id`,
-                            # because `id` can be missing in early chunks.
-                            item_key = (item.get('type'), item.get('index', 0))
+                            item_type = item.get("type")
+                            item_format = item.get("format")
+                            item_id = item.get("id")
+                            has_index = "index" in item and item.get("index") is not None
+                            item_index = item.get("index") if has_index else None
                             
-                            existing_item = index_map.get(item_key)
+                            id_key = ("id", item_type, item_id) if item_id else None
+                            index_key = ("index", item_type, item_index) if has_index else None
+                            unkeyed_key = (item_type, item_format)
+                            
+                            existing_item = None
+                            if id_key is not None:
+                                existing_item = index_map.get(id_key)
+                            
+                            if existing_item is None and index_key is not None:
+                                existing_item = index_map.get(index_key)
+                                if existing_item is not None and id_key is not None:
+                                    index_map[id_key] = existing_item
+                            
+                            if existing_item is None and (id_key is not None or index_key is not None):
+                                # Handle late-arriving id/index for an unkeyed item
+                                last_unkeyed = unkeyed_map.get(unkeyed_key)
+                                if last_unkeyed is not None:
+                                    last_chunk_id, last_item = last_unkeyed
+                                    if last_chunk_id != chunk_id:
+                                        existing_item = last_item
+                                        if id_key is not None:
+                                            index_map[id_key] = existing_item
+                                        if index_key is not None:
+                                            index_map[index_key] = existing_item
+                            
+                            if existing_item is None and id_key is None and index_key is None:
+                                last_unkeyed = unkeyed_map.get(unkeyed_key)
+                                if last_unkeyed is not None:
+                                    last_chunk_id, last_item = last_unkeyed
+                                    if last_chunk_id != chunk_id:
+                                        existing_item = last_item
+                            
                             if existing_item is None:
                                 # New item - add to list and index
                                 accumulated_kwargs[key].append(item)
-                                index_map[item_key] = item
+                                if id_key is not None:
+                                    index_map[id_key] = item
+                                if index_key is not None:
+                                    index_map[index_key] = item
+                                existing_item = item
                             else:
                                 # UPSERT: Merge new non-None fields into existing item
                                 # This captures fields like 'data' that may come in later chunks
                                 for k, v in item.items():
                                     if v is not None:
-                                        # Some fields can be streamed as fragments (e.g., summary/data).
-                                        if k in {"summary", "data"} and isinstance(v, str):
+                                        # Some fields can be streamed as fragments (e.g., summary/text/data).
+                                        if k in STREAMED_TEXT_FIELDS and isinstance(v, str):
                                             current = existing_item.get(k)
                                             if isinstance(current, str):
                                                 existing_item[k] = _merge_streamed_text(current, v)
@@ -623,6 +662,9 @@ class BaseOpenAICompatibleProvider(BaseProvider):
                                                 existing_item[k] = v
                                         else:
                                             existing_item[k] = v
+                            
+                            if id_key is None and index_key is None:
+                                unkeyed_map[unkeyed_key] = (chunk_id, existing_item)
                         else:
                             # Non-dict items, just append if not duplicate
                             if item not in accumulated_kwargs[key]:
@@ -632,21 +674,25 @@ class BaseOpenAICompatibleProvider(BaseProvider):
                     accumulated_kwargs[key] = value
         
         first: Optional[AIMessageChunk] = None
+        chunk_id = 0
         try:
             try:
                 first = next(stream_iter)
             except StopIteration:
                 return AIMessageChunk(content="")
             
+            chunk_id += 1
+            
             # Check for mid-stream error in first chunk
             BaseOpenAICompatibleProvider._check_for_stream_error(first)
             
             # Capture additional_kwargs from first chunk
             if hasattr(first, 'additional_kwargs') and first.additional_kwargs:
-                accumulate_kwargs(first.additional_kwargs)
+                accumulate_kwargs(first.additional_kwargs, chunk_id)
             
             aggregate = first
             for chunk in stream_iter:
+                chunk_id += 1
                 # Wall-clock deadline check
                 elapsed = time.monotonic() - start_time
                 if elapsed > max_wall_time_seconds:
@@ -664,7 +710,7 @@ class BaseOpenAICompatibleProvider(BaseProvider):
                 
                 # Capture additional_kwargs from this chunk before merging
                 if hasattr(chunk, 'additional_kwargs') and chunk.additional_kwargs:
-                    accumulate_kwargs(chunk.additional_kwargs)
+                    accumulate_kwargs(chunk.additional_kwargs, chunk_id)
                 
                 aggregate += chunk
             
@@ -1146,9 +1192,11 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "anthropic/claude-sonnet",  # Claude Sonnet family supports reasoning tokens
         "anthropic/claude-3.7-sonnet",  # Explicit prefix for 3.7 Sonnet slug
         "anthropic/claude-opus",  # Claude Opus family supports reasoning tokens
-        "deepseek/deepseek-chat",  # DeepSeek v3.1 exposes reasoning traces via effort flag
+        "deepseek/deepseek-chat",  # DeepSeek v3.1 reasoning traces via effort flag
+        "deepseek/deepseek-v3.2",  # DeepSeek v3.2 reasoning traces via reasoning.enabled
         "x-ai/grok-4",  # Grok 4 always returns reasoning traces
         "google/gemini-3-pro-preview",  # Gemini 3 Pro Preview exposes reasoning tokens via OpenRouter
+        "google/gemini-3-flash-preview",  # Gemini 3 Flash Preview exposes reasoning tokens via OpenRouter
     ]
     
     # Models that DON'T support native structured output via LangChain's with_structured_output
@@ -1161,6 +1209,9 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
     MAX_OUTPUT_TOKEN_MODELS = [
         "google/gemini",
         "x-ai/grok-4",
+        # OpenAI reasoning models (Responses API via OpenRouter)
+        "openai/gpt-5",
+        "openai/o",
     ]
 
     # Model slug mappings for friendly names → OpenRouter format
@@ -1185,6 +1236,13 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "gpt-5.1-chat": "openai/gpt-5.1-chat",
         "gpt5.1": "openai/gpt-5.1",
         "gpt5.1-chat": "openai/gpt-5.1-chat",
+        # GPT models (explicit GPT-5.2 mappings)
+        "gpt-5.2": "openai/gpt-5.2",
+        "gpt-5.2-pro": "openai/gpt-5.2-pro",
+        "gpt-5.2-chat": "openai/gpt-5.2-chat",
+        "gpt5.2": "openai/gpt-5.2",
+        "gpt5.2-pro": "openai/gpt-5.2-pro",
+        "gpt5.2-chat": "openai/gpt-5.2-chat",
         # GPT models pass through as-is
         # Gemini models
         "gemini-2.5-pro": "google/gemini-2.5-pro",
@@ -1195,6 +1253,10 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "gemini-3-pro": "google/gemini-3-pro-preview",
         "gemini3-pro-preview": "google/gemini-3-pro-preview",
         "gemini3pro": "google/gemini-3-pro-preview",
+        "gemini-3-flash-preview": "google/gemini-3-flash-preview",
+        "gemini-3-flash": "google/gemini-3-flash-preview",
+        "gemini3-flash-preview": "google/gemini-3-flash-preview",
+        "gemini3-flash": "google/gemini-3-flash-preview",
         # Grok models
         "grok-4": "x-ai/grok-4",
         "grok-4.1-fast": "x-ai/grok-4.1-fast",
@@ -1206,6 +1268,9 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         # DeepSeek models
         "deepseek-chat-v3.1": "deepseek/deepseek-chat-v3.1",
         "deepseek-v3.1": "deepseek/deepseek-chat-v3.1",
+        "deepseek-v3.2": "deepseek/deepseek-v3.2",
+        "deepseek-v3.2-speciale": "deepseek/deepseek-v3.2-speciale",
+        "deepseek-3.2": "deepseek/deepseek-v3.2",
         # Llama, Mistral, etc. pass through as-is
     }
 
@@ -1233,6 +1298,12 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "openai/gpt-5.1": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "gpt-5.1-chat": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "openai/gpt-5.1-chat": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "gpt-5.2": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "openai/gpt-5.2": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "gpt-5.2-pro": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "openai/gpt-5.2-pro": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "gpt-5.2-chat": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "openai/gpt-5.2-chat": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "gpt-5-chat-latest": {"max_input_tokens": 128000, "max_output_tokens": 16384},
         "gpt-4.1": {"max_input_tokens": 1_000_000, "max_output_tokens": 32768},
         "gpt-4.1-mini": {"max_input_tokens": 1_000_000, "max_output_tokens": 32768},
@@ -1255,6 +1326,8 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "google/gemini-2.5-pro": {"max_input_tokens": 1_048_576, "max_output_tokens": 65535},
         "gemini-3-pro-preview": {"max_input_tokens": 1_048_576, "max_output_tokens": 65536},
         "google/gemini-3-pro-preview": {"max_input_tokens": 1_048_576, "max_output_tokens": 65536},
+        "gemini-3-flash-preview": {"max_input_tokens": 1_048_576, "max_output_tokens": 65536},
+        "google/gemini-3-flash-preview": {"max_input_tokens": 1_048_576, "max_output_tokens": 65536},
 
         # Grok model
         "grok-4": {"max_input_tokens": 256_000, "max_output_tokens": 32768},
@@ -1270,6 +1343,10 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         # DeepSeek model
         "deepseek-chat-v3.1": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
         "deepseek/deepseek-chat-v3.1": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
+        "deepseek-v3.2": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
+        "deepseek/deepseek-v3.2": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
+        "deepseek-v3.2-speciale": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
+        "deepseek/deepseek-v3.2-speciale": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
 
         # Llama models
         "llama-3.3": {"max_input_tokens": 128000, "max_output_tokens": 8192},
@@ -1311,7 +1388,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
             "opus": "anthropic/claude-opus-4",
             "gemini": "google/gemini-3-pro-preview",
             "grok": "x-ai/grok-4",
-            "deepseek": "deepseek/deepseek-chat-v3.1",
+            "deepseek": "deepseek/deepseek-v3.2",
         }
 
         name_key = model.lower().strip()
@@ -1370,6 +1447,11 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
             # Request encrypted reasoning content for OpenAI/Azure Responses API
             # This makes the reasoning payload portable without store:true
             extra_body["include"] = ["reasoning.encrypted_content"]
+
+        # DeepSeek v3.2 uses a different reasoning knob on OpenRouter.
+        # - For deepthink=True, prefer reasoning.enabled instead of effort.
+        if deepthink is True and transformed.startswith("deepseek/deepseek-v3.2"):
+            extra_body["reasoning"] = {"enabled": True}
         
         needs_max_output_tokens = any(
             transformed.startswith(prefix) for prefix in self.MAX_OUTPUT_TOKEN_MODELS
