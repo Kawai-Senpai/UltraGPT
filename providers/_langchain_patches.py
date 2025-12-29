@@ -107,6 +107,18 @@ def _sanitize_reasoning_details_for_api(value: Any) -> Any:
             return item
         if "id" not in item:
             return item
+
+        # Only strip truly ephemeral reasoning ids (commonly rs_*).
+        # Gemini tool-call continuity may rely on non-rs ids that link encrypted
+        # thought_signature blocks to specific tool calls.
+        try:
+            item_id = item.get("id")
+            if isinstance(item_id, str) and not item_id.startswith("rs_"):
+                return item
+        except Exception:
+            # If id is weird/unexpected, keep it rather than risk breaking continuity.
+            return item
+
         copied = dict(item)
         copied.pop("id", None)
         return copied
