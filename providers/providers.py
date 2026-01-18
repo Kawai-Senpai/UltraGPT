@@ -1510,6 +1510,46 @@ class ProviderManager:
         self._verbose = verbose
         self._reserve_ratio = reserve_ratio
 
+    @staticmethod
+    def _strip_virtual_high_alias(model: str) -> Tuple[str, bool]:
+        cleaned = (model or "").strip()
+        if not cleaned:
+            return cleaned, False
+
+        marker = "::high"
+        lowered = cleaned.lower()
+        if lowered.endswith(marker) and len(cleaned) > len(marker):
+            return cleaned[: -len(marker)], True
+
+        return cleaned, False
+
+    def _should_force_high_reasoning(self, provider: BaseProvider, model_name: str) -> bool:
+        if not hasattr(provider, "_does_support_thinking"):
+            return False
+        if not provider._does_support_thinking(model_name):
+            return False
+
+        transformed = model_name
+        if hasattr(provider, "_transform_model_name"):
+            transformed = provider._transform_model_name(model_name)
+
+        return str(transformed).lower().startswith("openai/gpt-5")
+
+    def _normalize_model_for_request(
+        self,
+        model: str,
+        deepthink: Optional[bool],
+    ) -> Tuple[str, str, Optional[bool]]:
+        cleaned_model, wants_high = self._strip_virtual_high_alias(model)
+        provider_name, model_name = self.parse_model_string(cleaned_model)
+
+        if wants_high:
+            provider = self.get_provider(provider_name)
+            if self._should_force_high_reasoning(provider, model_name):
+                deepthink = True
+
+        return provider_name, model_name, deepthink
+
     def add_provider(self, name: str, provider: BaseProvider) -> None:
         self.providers[name] = provider
 
@@ -1531,7 +1571,8 @@ class ProviderManager:
         This allows the caller to skip fake deepthink pipeline and use native reasoning instead.
         """
         try:
-            provider_name, model_name = self.parse_model_string(model)
+            cleaned_model, _ = self._strip_virtual_high_alias(model)
+            provider_name, model_name = self.parse_model_string(cleaned_model)
             provider = self.get_provider(provider_name)
             
             # Check if provider has _does_support_thinking method
@@ -1630,7 +1671,7 @@ class ProviderManager:
         input_truncation: Optional[Union[str, int]] = None,
         keep_newest: bool = True,
     ) -> Tuple[str, int, Dict[str, Any]]:
-        provider_name, model_name = self.parse_model_string(model)
+        provider_name, model_name, deepthink = self._normalize_model_for_request(model, deepthink)
         provider = self.get_provider(provider_name)
         prepared = self._prepare_messages(
             provider_name,
@@ -1653,7 +1694,7 @@ class ProviderManager:
         input_truncation: Optional[Union[str, int]] = None,
         keep_newest: bool = True,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
-        provider_name, model_name = self.parse_model_string(model)
+        provider_name, model_name, deepthink = self._normalize_model_for_request(model, deepthink)
         provider = self.get_provider(provider_name)
         prepared = self._prepare_messages(
             provider_name,
@@ -1678,7 +1719,7 @@ class ProviderManager:
         input_truncation: Optional[Union[str, int]] = None,
         keep_newest: bool = True,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
-        provider_name, model_name = self.parse_model_string(model)
+        provider_name, model_name, deepthink = self._normalize_model_for_request(model, deepthink)
         provider = self.get_provider(provider_name)
         prepared = self._prepare_messages(
             provider_name,
