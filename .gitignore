@@ -1,4 +1,92 @@
-test.py
+# ============================================
+# UltraGPT .gitignore
+# ============================================
+
+# ----- Environment & Secrets -----
+.env
+*.env
+.env.*
+
+# ----- Python Cache & Build Artifacts -----
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ----- IDE & Editor -----
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+tests/
+.project
+.pydevproject
+.settings/
+
+# ----- Testing Cache (not tests themselves) -----
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+pytest_cache/
+
+# ----- MCP & Infinite Code -----
+.infinitecode/
+._mcp_deleted_backups/
+
+# ----- Project-Specific Exclusions -----
+# Debug outputs
+debug/
+
+# Temporary test files (not the main tests/ folder)
+tmp_tests/
+
+# Cache directories
+cache/
+
+# Todo (internal notes)
+todo/
+
+# Upload scripts (contains credentials logic)
+upload.bat
 _auto_git_summary.bat
-reports/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+*.ipynb
+
+# ----- OS-Specific -----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ----- Type Checking -----
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+
+# ----- Virtual Environments -----
+venv/
+ENV/
+env/
+.venv/
+env/
+.venv/
