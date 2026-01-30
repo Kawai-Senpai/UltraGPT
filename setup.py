@@ -7,7 +7,7 @@ long_description = (this_directory / "README.md").read_text(encoding='utf-8')
 
 setup(
     name='ultragpt',
-    version='7.0.0',
+    version='7.1.0',
     license="MIT",
     author='Ranit Bhowmick',
     author_email='mail@ranitbhowmick.com',
