@@ -464,14 +464,29 @@ class BaseOpenAICompatibleProvider(BaseProvider):
     ) -> ChatOpenAI:
         return self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
 
+    # Valid reasoning effort levels accepted via the virtual ::suffix system.
+    VALID_EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+
     def _build_extra_body(
         self,
         model: str,
         max_tokens: Optional[int],
         deepthink: Optional[bool],
     ) -> Optional[Dict[str, Any]]:
-        """Construct provider-specific extra_body payload."""
-        if deepthink is True and hasattr(self, "_does_support_thinking") and self._does_support_thinking(model):
+        """Construct provider-specific extra_body payload.
+
+        *deepthink* may be:
+          - ``True``  → reasoning.effort = high  (backward compat)
+          - A string from ``VALID_EFFORT_LEVELS`` → reasoning.effort = <that string>
+          - ``None`` / ``False`` → no reasoning override
+        """
+        if not deepthink:
+            return None
+        if not (hasattr(self, "_does_support_thinking") and self._does_support_thinking(model)):
+            return None
+        if isinstance(deepthink, str) and deepthink in self.VALID_EFFORT_LEVELS:
+            return {"reasoning": {"effort": deepthink}}
+        if deepthink is True:
             return {"reasoning": {"effort": "high"}}
         return None
 
@@ -1197,6 +1212,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "x-ai/grok-4",  # Grok 4 always returns reasoning traces
         "google/gemini-3-pro-preview",  # Gemini 3 Pro Preview exposes reasoning tokens via OpenRouter
         "google/gemini-3-flash-preview",  # Gemini 3 Flash Preview exposes reasoning tokens via OpenRouter
+        "z-ai/glm",  # Z.AI GLM-5 supports thinking mode (on by default)
     ]
     
     # Models that DON'T support native structured output via LangChain's with_structured_output
@@ -1209,6 +1225,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
     MAX_OUTPUT_TOKEN_MODELS = [
         "google/gemini",
         "x-ai/grok-4",
+        "z-ai/glm",  # Z.AI GLM-5 (128k max output)
         # OpenAI reasoning models (Responses API via OpenRouter)
         "openai/gpt-5",
         "openai/o",
@@ -1261,6 +1278,9 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "grok-4": "x-ai/grok-4",
         "grok-4.1-fast": "x-ai/grok-4.1-fast",
         "grok-4-1-fast": "x-ai/grok-4.1-fast",
+        # Z.AI / GLM models
+        "glm-5": "z-ai/glm-5",
+        "glm5": "z-ai/glm-5",
         # Qwen models
         "qwen3-vl-235b-a22b-instruct": "qwen/qwen3-vl-235b-a22b-instruct",
         "qwen3-vl-235b-instruct": "qwen/qwen3-vl-235b-a22b-instruct",
@@ -1335,6 +1355,10 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         # Grok 4.1 Fast (2M context, ~30k output as per xAI/OpenRouter docs)
         "grok-4.1-fast": {"max_input_tokens": 2_000_000, "max_output_tokens": 30_000},
         "x-ai/grok-4.1-fast": {"max_input_tokens": 2_000_000, "max_output_tokens": 30_000},
+
+        # Z.AI GLM-5 (202k context, 128k output per Z.AI docs / OpenRouter listing)
+        "glm-5": {"max_input_tokens": 202_752, "max_output_tokens": 128_000},
+        "z-ai/glm-5": {"max_input_tokens": 202_752, "max_output_tokens": 128_000},
 
         # Qwen3 VL (per OpenRouter listing ~131k context; keep output conservative until verified)
         "qwen3-vl-235b-a22b-instruct": {"max_input_tokens": 131_072, "max_output_tokens": 8_192},
@@ -1511,42 +1535,51 @@ class ProviderManager:
         self._reserve_ratio = reserve_ratio
 
     @staticmethod
-    def _strip_virtual_high_alias(model: str) -> Tuple[str, bool]:
+    def _strip_virtual_effort_suffix(model: str) -> Tuple[str, Optional[str]]:
+        """Strip a virtual ``::effort`` suffix from a model string.
+
+        Returns ``(cleaned_model, effort)`` where *effort* is one of
+        ``none | minimal | low | medium | high | xhigh`` or ``None``
+        when no recognised suffix is present.
+        """
         cleaned = (model or "").strip()
-        if not cleaned:
-            return cleaned, False
+        if not cleaned or "::" not in cleaned:
+            return cleaned, None
 
-        marker = "::high"
-        lowered = cleaned.lower()
-        if lowered.endswith(marker) and len(cleaned) > len(marker):
-            return cleaned[: -len(marker)], True
+        idx = cleaned.rfind("::")
+        suffix = cleaned[idx + 2 :].strip().lower()
+        base = cleaned[:idx]
 
-        return cleaned, False
+        if suffix in BaseOpenAICompatibleProvider.VALID_EFFORT_LEVELS and base:
+            return base, suffix
 
-    def _should_force_high_reasoning(self, provider: BaseProvider, model_name: str) -> bool:
-        if not hasattr(provider, "_does_support_thinking"):
-            return False
-        if not provider._does_support_thinking(model_name):
-            return False
+        return cleaned, None
 
-        transformed = model_name
-        if hasattr(provider, "_transform_model_name"):
-            transformed = provider._transform_model_name(model_name)
-
-        return str(transformed).lower().startswith("openai/gpt-5")
+    # Backward-compat alias so any external callers / tests still work.
+    @staticmethod
+    def _strip_virtual_high_alias(model: str) -> Tuple[str, bool]:
+        base, effort = ProviderManager._strip_virtual_effort_suffix(model)
+        return base, effort == "high"
 
     def _normalize_model_for_request(
         self,
         model: str,
         deepthink: Optional[bool],
     ) -> Tuple[str, str, Optional[bool]]:
-        cleaned_model, wants_high = self._strip_virtual_high_alias(model)
+        """Strip virtual effort suffix and convert it to a deepthink override.
+
+        Returns ``(provider_name, model_name, deepthink)`` where *deepthink*
+        may be ``True`` (effort=high, backward compat), a string effort level
+        like ``"medium"`` or ``"xhigh"``, or the original value.
+        """
+        cleaned_model, effort = self._strip_virtual_effort_suffix(model)
         provider_name, model_name = self.parse_model_string(cleaned_model)
 
-        if wants_high:
+        if effort is not None:
             provider = self.get_provider(provider_name)
-            if self._should_force_high_reasoning(provider, model_name):
-                deepthink = True
+            if hasattr(provider, "_does_support_thinking") and provider._does_support_thinking(model_name):
+                # ``::high`` → True (backward compat); everything else → effort string
+                deepthink = True if effort == "high" else effort
 
         return provider_name, model_name, deepthink
 
@@ -1571,7 +1604,7 @@ class ProviderManager:
         This allows the caller to skip fake deepthink pipeline and use native reasoning instead.
         """
         try:
-            cleaned_model, _ = self._strip_virtual_high_alias(model)
+            cleaned_model, _ = self._strip_virtual_effort_suffix(model)
             provider_name, model_name = self.parse_model_string(cleaned_model)
             provider = self.get_provider(provider_name)
             
