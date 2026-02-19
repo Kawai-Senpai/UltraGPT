@@ -28,6 +28,38 @@ from .chat_flow import ChatFlow
 from .pipelines import PipelineRunner
 
 
+def _normalize_content_to_str(content: Any) -> str:
+    """Normalize LLM response content to a plain string.
+    
+    Handles all content formats returned by various LLM providers:
+    - str: returned as-is
+    - None: returns ""
+    - list: multi-modal content blocks (e.g. [{"type": "text", "text": "..."}])
+            extracts and joins all text blocks
+    - other: str() conversion
+    
+    Returns:
+        Plain string content, possibly empty string "" but never None.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        # Multi-modal content blocks (Anthropic/Claude native format)
+        # Extract text from content blocks like [{"type": "text", "text": "..."}]
+        text_parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text" and "text" in block:
+                    text_parts.append(str(block["text"]))
+                elif "text" in block:
+                    text_parts.append(str(block["text"]))
+            elif isinstance(block, str):
+                text_parts.append(block)
+        return "\n".join(text_parts) if text_parts else ""
+    return str(content)
+
 class UltraGPT:
     """High-level façade coordinating providers, tools, and pipelines."""
 
@@ -673,21 +705,45 @@ class UltraGPT:
 
         simplified_response: Any
         if response_message.get("tool_calls"):
-            # For tool calls, attach reasoning_details so it can be stored in history
-            simplified_response = {
-                "tool_calls": response_message.get("tool_calls"),
-            }
-            if response_message.get("reasoning_details"):
-                simplified_response["reasoning_details"] = response_message["reasoning_details"]
-            # Return just the tool_calls array if allow_multiple, else first tool call
+            tool_calls_list = response_message.get("tool_calls")
+            # Preserve any accompanying text content from the LLM alongside tool calls.
+            # LLMs often write explanatory text ("I'll update clip X...") while also
+            # returning tool calls. This content should NOT be dropped.
+            accompanying_content = _normalize_content_to_str(response_message.get("content"))
+            has_content = bool(accompanying_content and accompanying_content.strip())
+            
             if allow_multiple:
-                simplified_response = simplified_response["tool_calls"]
-                # Note: reasoning_details will be in details_dict, not simplified_response
+                if has_content:
+                    # Return dict with BOTH tool_calls and content - never drop LLM data
+                    simplified_response = {
+                        "tool_calls": tool_calls_list,
+                        "content": accompanying_content,
+                    }
+                else:
+                    # No accompanying text - return just the tool calls list (backward compatible)
+                    simplified_response = tool_calls_list
             else:
-                simplified_response = simplified_response["tool_calls"][0] if simplified_response["tool_calls"] else None
+                single_tc = tool_calls_list[0] if tool_calls_list else None
+                if has_content and single_tc:
+                    simplified_response = {
+                        "tool_calls": [single_tc],
+                        "content": accompanying_content,
+                    }
+                elif single_tc:
+                    simplified_response = single_tc
+                else:
+                    simplified_response = {"content": accompanying_content or ""}
+            
+            # Note: reasoning_details always available in details_dict regardless
         else:
-            content = response_message.get("content")
-            simplified_response = {"content": content} if content and str(content).strip() else None
+            # No tool calls - return text content wrapped in dict.
+            # CRITICAL: Never return None - always return {"content": ""} at minimum.
+            # Returning None causes downstream consumers to produce str(None) = "None" string.
+            content = _normalize_content_to_str(response_message.get("content"))
+            if content and content.strip():
+                simplified_response = {"content": content}
+            else:
+                simplified_response = {"content": ""}
 
         return simplified_response, total_tokens, details_dict
 

@@ -258,6 +258,43 @@ response, tokens, details = ultra.tool_call(
 print(details.get("reasoning_details"))
 ```
 
+### Tool Call Return Format
+
+`tool_call()` returns `(response, tokens, details_dict)`. The `response` value depends on what the LLM produces:
+
+| LLM Output | `allow_multiple=True` | `allow_multiple=False` |
+|---|---|---|
+| Tool calls only (most common) | `list` of tool call dicts | Single tool call `dict` |
+| Tool calls + text content | `{"tool_calls": [...], "content": "text"}` | `{"tool_calls": [...], "content": "text"}` |
+| Text only (no tool calls) | `{"content": "text"}` | `{"content": "text"}` |
+| Empty response | `{"content": ""}` | `{"content": ""}` |
+
+**Key guarantees:**
+- `tool_call()` **never returns `None`** - always a list or dict
+- LLM text content is **never dropped** - even when returned alongside tool calls
+- Multi-modal content blocks (list-type) are automatically normalized to plain strings
+- `details_dict["reasoning_details"]` is always available separately (3rd return value)
+
+**Handling all cases:**
+```python
+response, tokens, details = ultra.tool_call(messages=msgs, user_tools=tools, allow_multiple=True)
+
+if isinstance(response, list):
+    # Tool calls only (backward-compatible array)
+    for tc in response:
+        name = tc["function"]["name"]
+        args = tc["function"]["arguments"]
+
+elif isinstance(response, dict):
+    if "tool_calls" in response:
+        # Mixed: tool calls + accompanying text from LLM
+        tool_calls = response["tool_calls"]
+        llm_text = response.get("content", "")  # "Let me check that..."
+    else:
+        # Text only (no tool calls)
+        text = response.get("content", "")
+```
+
 ---
 
 ## 📝 Pipelines
