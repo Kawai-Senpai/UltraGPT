@@ -1210,6 +1210,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "deepseek/deepseek-chat",  # DeepSeek v3.1 reasoning traces via effort flag
         "deepseek/deepseek-v3.2",  # DeepSeek v3.2 reasoning traces via reasoning.enabled
         "x-ai/grok-4",  # Grok 4 always returns reasoning traces
+        "google/gemini-3.1-pro-preview",  # Gemini 3.1 Pro Preview (enhanced SWE + agentic perf)
         "google/gemini-3-pro-preview",  # Gemini 3 Pro Preview exposes reasoning tokens via OpenRouter
         "google/gemini-3-flash-preview",  # Gemini 3 Flash Preview exposes reasoning tokens via OpenRouter
         "z-ai/glm",  # Z.AI GLM-5 supports thinking mode (on by default)
@@ -1266,6 +1267,9 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "gemini-pro-2.5": "google/gemini-2.5-pro",
         "gemini-pro": "google/gemini-2.5-pro",
         "gemini25pro": "google/gemini-2.5-pro",
+        "gemini-3.1-pro-preview": "google/gemini-3.1-pro-preview",
+        "gemini-3.1-pro": "google/gemini-3.1-pro-preview",
+        "gemini31pro": "google/gemini-3.1-pro-preview",
         "gemini-3-pro-preview": "google/gemini-3-pro-preview",
         "gemini-3-pro": "google/gemini-3-pro-preview",
         "gemini3-pro-preview": "google/gemini-3-pro-preview",
@@ -1344,6 +1348,8 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         # Gemini models
         "gemini-2.5-pro": {"max_input_tokens": 1_048_576, "max_output_tokens": 65535},
         "google/gemini-2.5-pro": {"max_input_tokens": 1_048_576, "max_output_tokens": 65535},
+        "gemini-3.1-pro-preview": {"max_input_tokens": 1_048_576, "max_output_tokens": 65536},
+        "google/gemini-3.1-pro-preview": {"max_input_tokens": 1_048_576, "max_output_tokens": 65536},
         "gemini-3-pro-preview": {"max_input_tokens": 1_048_576, "max_output_tokens": 65536},
         "google/gemini-3-pro-preview": {"max_input_tokens": 1_048_576, "max_output_tokens": 65536},
         "gemini-3-flash-preview": {"max_input_tokens": 1_048_576, "max_output_tokens": 65536},
@@ -1410,7 +1416,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
             "haiku": "anthropic/claude-3-haiku",
             "sonnet": "anthropic/claude-3.7-sonnet",
             "opus": "anthropic/claude-opus-4",
-            "gemini": "google/gemini-3-pro-preview",
+            "gemini": "google/gemini-3.1-pro-preview",
             "grok": "x-ai/grok-4",
             "deepseek": "deepseek/deepseek-v3.2",
         }
@@ -1646,6 +1652,7 @@ class ProviderManager:
         input_truncation: Optional[Union[str, int]],
         keep_newest: bool,
         enable_caching: bool = True,
+        reserve_ratio: Optional[float] = None,
     ) -> List[BaseMessage]:
         lc_messages = ensure_langchain_messages(messages)
         cleaned = remove_orphaned_tool_results_lc(lc_messages, verbose=self._verbose)
@@ -1668,7 +1675,8 @@ class ProviderManager:
         if max_tokens is None:
             return cleaned
 
-        effective_limit = max(1, int(max_tokens * self._reserve_ratio))
+        effective_ratio = reserve_ratio if reserve_ratio is not None else self._reserve_ratio
+        effective_limit = max(1, int(max_tokens * effective_ratio))
 
         try:
             provider = self.get_provider(provider_name)
@@ -1703,6 +1711,7 @@ class ProviderManager:
         deepthink: Optional[bool] = None,
         input_truncation: Optional[Union[str, int]] = None,
         keep_newest: bool = True,
+        reserve_ratio: Optional[float] = None,
     ) -> Tuple[str, int, Dict[str, Any]]:
         provider_name, model_name, deepthink = self._normalize_model_for_request(model, deepthink)
         provider = self.get_provider(provider_name)
@@ -1712,6 +1721,7 @@ class ProviderManager:
             messages,
             input_truncation=input_truncation,
             keep_newest=keep_newest,
+            reserve_ratio=reserve_ratio,
         )
         return provider.chat_completion(prepared, model_name, temperature, max_tokens, deepthink)
 
@@ -1726,6 +1736,7 @@ class ProviderManager:
         deepthink: Optional[bool] = None,
         input_truncation: Optional[Union[str, int]] = None,
         keep_newest: bool = True,
+        reserve_ratio: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         provider_name, model_name, deepthink = self._normalize_model_for_request(model, deepthink)
         provider = self.get_provider(provider_name)
@@ -1735,6 +1746,7 @@ class ProviderManager:
             messages,
             input_truncation=input_truncation,
             keep_newest=keep_newest,
+            reserve_ratio=reserve_ratio,
         )
         return provider.chat_completion_with_schema(prepared, schema, model_name, temperature, max_tokens, deepthink)
 
@@ -1751,6 +1763,7 @@ class ProviderManager:
         tool_choice: str = "required",
         input_truncation: Optional[Union[str, int]] = None,
         keep_newest: bool = True,
+        reserve_ratio: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         provider_name, model_name, deepthink = self._normalize_model_for_request(model, deepthink)
         provider = self.get_provider(provider_name)
@@ -1760,6 +1773,7 @@ class ProviderManager:
             messages,
             input_truncation=input_truncation,
             keep_newest=keep_newest,
+            reserve_ratio=reserve_ratio,
         )
         return provider.chat_completion_with_tools(
             prepared,

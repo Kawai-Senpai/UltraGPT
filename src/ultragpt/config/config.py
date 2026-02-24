@@ -18,7 +18,7 @@ DEFAULT_TEMPERATURE = 0.7
 # Token Configuration
 DEFAULT_INPUT_TRUNCATION = "AUTO"  # Can be "AUTO", "OFF", or a specific token number
 DEFAULT_AUTO_INPUT_LIMIT = 128_000  # Fallback input limit when model-specific limit is unavailable
-DEFAULT_RESERVE_RATIO = 0.8  # Reserve ratio for token truncation (0.8 = use 80%, leave 20% buffer)
+DEFAULT_RESERVE_RATIO = 0.65  # Reserve ratio for token truncation (0.65 = use 65%, leave 35% headroom to reduce hallucination from tight context packing)
 DEFAULT_MAX_OUTPUT_TOKENS = 1024  # Default max output tokens when model-specific limit is unavailable
 
 # Rate Limit Retry Configuration

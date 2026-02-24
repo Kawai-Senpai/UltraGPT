@@ -57,6 +57,7 @@ class ChatFlow:
         max_tokens: Optional[int] = None,
         input_truncation: Optional[Union[str, int]] = None,
         deepthink: Optional[bool] = None,
+        reserve_ratio: Optional[float] = None,
     ) -> Tuple[str, int, Dict[str, Any]]:
         """Synchronously call the provider and return text output."""
 
@@ -87,6 +88,7 @@ class ChatFlow:
             max_tokens=max_tokens if max_tokens is not None else self._max_tokens,
             input_truncation=input_truncation,
             deepthink=deepthink,
+            reserve_ratio=reserve_ratio,
         )
 
         details_dict = {
@@ -108,6 +110,7 @@ class ChatFlow:
         max_tokens: Optional[int],
         input_truncation: Optional[Union[str, int]],
         deepthink: Optional[bool],
+        reserve_ratio: Optional[float] = None,
     ) -> Tuple[Any, int, Dict[str, Any]]:
         model = model or "gpt-4o"
         lc_messages = self._ensure_lc_messages(messages)
@@ -126,6 +129,7 @@ class ChatFlow:
             max_tokens=max_tokens if max_tokens is not None else self._max_tokens,
             input_truncation=input_truncation,
             deepthink=deepthink,
+            reserve_ratio=reserve_ratio,
         )
 
         details_dict = {
@@ -148,6 +152,7 @@ class ChatFlow:
         input_truncation: Optional[Union[str, int]],
         parallel_tool_calls: Optional[bool],
         deepthink: Optional[bool],
+        reserve_ratio: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         lc_messages = self._ensure_lc_messages(messages)
 
@@ -168,6 +173,7 @@ class ChatFlow:
             parallel_tool_calls=parallel_tool_calls,
             input_truncation=input_truncation,
             deepthink=deepthink,
+            reserve_ratio=reserve_ratio,
         )
 
         details_dict = {

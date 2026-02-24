@@ -71,6 +71,7 @@ class UltraGPT:
         search_engine_id: str = None,
         max_tokens: Optional[int] = None,
         input_truncation: Union[str, int] = None,
+        reserve_ratio: Optional[float] = None,
         verbose: bool = False,
         logger_name: str = "ultragpt",
         logger_filename: str = "debug/ultragpt.log",
@@ -107,6 +108,7 @@ class UltraGPT:
         self.search_engine_id = search_engine_id
         self.max_tokens = max_tokens
         self.input_truncation = input_truncation if input_truncation is not None else config.DEFAULT_INPUT_TRUNCATION
+        self.reserve_ratio = reserve_ratio if reserve_ratio is not None else config.DEFAULT_RESERVE_RATIO
 
         self.log = logger(
             name=logger_name,
@@ -129,6 +131,7 @@ class UltraGPT:
             default_input_truncation=self.input_truncation,
             logger=self.log,
             verbose=self.verbose,
+            reserve_ratio=self.reserve_ratio,
         )
 
         # OpenRouter is the only provider - universal access to all models
@@ -175,6 +178,7 @@ class UltraGPT:
         max_tokens: Optional[int] = None,
         input_truncation: Optional[Union[str, int]] = None,
         deepthink: Optional[bool] = None,
+        reserve_ratio: Optional[float] = None,
     ) -> Tuple[str, int, Dict[str, Any]]:
         tools = tools or []
         tools_config = tools_config or {}
@@ -187,6 +191,7 @@ class UltraGPT:
             max_tokens=max_tokens,
             input_truncation=input_truncation,
             deepthink=deepthink,
+            reserve_ratio=reserve_ratio,
         )
 
     def chat_with_model_parse(
@@ -200,6 +205,7 @@ class UltraGPT:
         max_tokens: Optional[int] = None,
         input_truncation: Optional[Union[str, int]] = None,
         deepthink: Optional[bool] = None,
+        reserve_ratio: Optional[float] = None,
     ) -> Tuple[Any, int, Dict[str, Any]]:
         model = model or config.DEFAULT_PARSE_MODEL
         temperature = temperature if temperature is not None else config.DEFAULT_TEMPERATURE
@@ -215,6 +221,7 @@ class UltraGPT:
             max_tokens=max_tokens,
             input_truncation=input_truncation,
             deepthink=deepthink,
+            reserve_ratio=reserve_ratio,
         )
 
     def chat_with_model_tools(
@@ -229,6 +236,7 @@ class UltraGPT:
         input_truncation: Optional[Union[str, int]] = None,
         parallel_tool_calls: Optional[bool] = None,
         deepthink: Optional[bool] = None,
+        reserve_ratio: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         model = model or config.DEFAULT_MODEL
         temperature = temperature if temperature is not None else config.DEFAULT_TEMPERATURE
@@ -252,6 +260,7 @@ class UltraGPT:
             input_truncation=input_truncation,
             parallel_tool_calls=parallel_tool_calls,
             deepthink=deepthink,
+            reserve_ratio=reserve_ratio,
         )
 
     def _build_tool_instruction_prompt(self, tools: List[Dict[str, Any]], allow_multiple: bool = True) -> Optional[str]:
@@ -341,6 +350,7 @@ class UltraGPT:
         temperature: float = None,
         max_tokens: Optional[int] = None,
         input_truncation: Optional[Union[str, int]] = None,
+        reserve_ratio: Optional[float] = None,
         reasoning_iterations: int = None,
         steps_pipeline: bool = False,
         reasoning_pipeline: bool = False,
@@ -472,6 +482,7 @@ class UltraGPT:
                 max_tokens=max_tokens,
                 input_truncation=input_truncation,
                 deepthink=final_deepthink,
+                reserve_ratio=reserve_ratio,
             )
         else:
             final_output, tokens, final_details = self.chat_with_ai_sync(
@@ -483,6 +494,7 @@ class UltraGPT:
                 max_tokens=max_tokens,
                 input_truncation=input_truncation,
                 deepthink=final_deepthink,
+                reserve_ratio=reserve_ratio,
             )
 
         if steps_list:
@@ -560,6 +572,7 @@ class UltraGPT:
         model: str = None,
         temperature: float = None,
         input_truncation: Optional[Union[str, int]] = None,
+        reserve_ratio: Optional[float] = None,
         reasoning_iterations: int = None,
         steps_pipeline: bool = False,
         reasoning_pipeline: bool = False,
@@ -680,6 +693,7 @@ class UltraGPT:
             input_truncation=input_truncation,
             parallel_tool_calls=parallel_calls,
             deepthink=final_deepthink,
+            reserve_ratio=reserve_ratio,
         )
 
         total_tokens = reasoning_tokens + steps_tokens + tokens
