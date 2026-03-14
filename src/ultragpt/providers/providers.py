@@ -467,6 +467,10 @@ class BaseOpenAICompatibleProvider(BaseProvider):
     # Valid reasoning effort levels accepted via the virtual ::suffix system.
     VALID_EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
 
+    # Model-specific effort aliases (prefix match on transformed model name).
+    # Example: {"openai/gpt-5.4": {"minimal": "low"}}
+    EFFORT_ALIASES_BY_MODEL_PREFIX: Dict[str, Dict[str, str]] = {}
+
     def _build_extra_body(
         self,
         model: str,
@@ -484,8 +488,16 @@ class BaseOpenAICompatibleProvider(BaseProvider):
             return None
         if not (hasattr(self, "_does_support_thinking") and self._does_support_thinking(model)):
             return None
-        if isinstance(deepthink, str) and deepthink in self.VALID_EFFORT_LEVELS:
-            return {"reasoning": {"effort": deepthink}}
+        if isinstance(deepthink, str):
+            effort = deepthink
+            transformed = self._transform_model_name(model)
+            if self.EFFORT_ALIASES_BY_MODEL_PREFIX:
+                for prefix, aliases in self.EFFORT_ALIASES_BY_MODEL_PREFIX.items():
+                    if transformed.startswith(prefix):
+                        effort = aliases.get(effort, effort)
+                        break
+            if effort in self.VALID_EFFORT_LEVELS:
+                return {"reasoning": {"effort": effort}}
         if deepthink is True:
             return {"reasoning": {"effort": "high"}}
         return None
@@ -976,6 +988,19 @@ class BaseOpenAICompatibleProvider(BaseProvider):
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         extra_body = self._build_extra_body(model, max_tokens, deepthink)
         extra_kwargs = {"extra_body": extra_body} if extra_body else {}
+
+        transformed = self._transform_model_name(model)
+        if hasattr(self, "NO_NATIVE_STRUCTURED_OUTPUT"):
+            for prefix in self.NO_NATIVE_STRUCTURED_OUTPUT:
+                if transformed.startswith(prefix):
+                    return self.chat_completion_with_schema_via_tools(
+                        messages,
+                        schema,
+                        model,
+                        temperature,
+                        max_tokens=max_tokens,
+                        deepthink=deepthink,
+                    )
         
         llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens, extra_kwargs=extra_kwargs)
         schema_dict = prepare_schema_for_openai(schema.model_json_schema())
@@ -1201,6 +1226,9 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
     # Systematic model behavior maps (OpenRouter-specific)
     NO_TEMPERATURE_MODELS = ["openai/o", "openai/gpt-5"]  # OpenAI reasoning models routed via OpenRouter
     NO_MAX_TOKENS_MODELS = ["openai/o", "openai/gpt-5"]  # OpenAI reasoning models routed via OpenRouter
+    EFFORT_ALIASES_BY_MODEL_PREFIX = {
+        "openai/gpt-5": {"minimal": "low"},
+    }
     REASONING_MODELS = [
         "openai/o",  # o1, o3, etc.
         "openai/gpt-5",  # gpt-5, gpt-5-pro, etc.
@@ -1220,6 +1248,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
     # Need tool-based workaround (convert schema to tool)
     NO_NATIVE_STRUCTURED_OUTPUT = [
         "anthropic/claude",  # All Claude models via OpenRouter don't support native structured output
+        "openai/gpt-5.4-pro",  # GPT-5.4 Pro is Responses-only; avoid native structured output
     ]
 
     # Models that expect max_output_tokens instead of max_tokens in the payload
@@ -1261,6 +1290,14 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "gpt5.2": "openai/gpt-5.2",
         "gpt5.2-pro": "openai/gpt-5.2-pro",
         "gpt5.2-chat": "openai/gpt-5.2-chat",
+        # GPT models (explicit GPT-5.4 mappings)
+        "gpt-5.4": "openai/gpt-5.4",
+        "gpt-5.4-pro": "openai/gpt-5.4-pro",
+        "gpt5.4": "openai/gpt-5.4",
+        "gpt5.4-pro": "openai/gpt-5.4-pro",
+        # Snapshot pinning aliases
+        "gpt-5.4-2026-03-05": "openai/gpt-5.4",
+        "gpt-5.4-pro-2026-03-05": "openai/gpt-5.4-pro",
         # GPT models pass through as-is
         # Gemini models
         "gemini-2.5-pro": "google/gemini-2.5-pro",
@@ -1328,6 +1365,10 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "openai/gpt-5.2-pro": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "gpt-5.2-chat": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "openai/gpt-5.2-chat": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "gpt-5.4": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
+        "openai/gpt-5.4": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
+        "gpt-5.4-pro": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
+        "openai/gpt-5.4-pro": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
         "gpt-5-chat-latest": {"max_input_tokens": 128000, "max_output_tokens": 16384},
         "gpt-4.1": {"max_input_tokens": 1_000_000, "max_output_tokens": 32768},
         "gpt-4.1-mini": {"max_input_tokens": 1_000_000, "max_output_tokens": 32768},
