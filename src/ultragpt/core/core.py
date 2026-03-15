@@ -164,6 +164,77 @@ class UltraGPT:
     def _ensure_lc_messages(messages: List[Any]) -> List[BaseMessage]:
         return ensure_langchain_messages(messages)
 
+    @staticmethod
+    def _int_or_zero(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _build_token_usage(
+        cls,
+        *,
+        total_tokens: int,
+        final_tokens: int,
+        final_details: Dict[str, Any],
+        reasoning_tokens: int = 0,
+        steps_tokens: int = 0,
+        reasoning_usage: Optional[Dict[str, Any]] = None,
+        steps_usage: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        reasoning_usage = reasoning_usage or {}
+        steps_usage = steps_usage or {}
+
+        final_total = cls._int_or_zero(final_details.get("total_tokens"))
+        if final_total <= 0:
+            final_total = cls._int_or_zero(final_tokens)
+
+        final_input = cls._int_or_zero(final_details.get("input_tokens"))
+        final_output = cls._int_or_zero(final_details.get("output_tokens"))
+        final_reasoning_api = cls._int_or_zero(final_details.get("reasoning_tokens"))
+
+        reasoning_total = cls._int_or_zero(reasoning_usage.get("total_tokens"))
+        if reasoning_total <= 0:
+            reasoning_total = cls._int_or_zero(reasoning_tokens)
+
+        steps_total = cls._int_or_zero(steps_usage.get("total_tokens"))
+        if steps_total <= 0:
+            steps_total = cls._int_or_zero(steps_tokens)
+
+        return {
+            "overall": {
+                "input_tokens": final_input
+                + cls._int_or_zero(reasoning_usage.get("input_tokens"))
+                + cls._int_or_zero(steps_usage.get("input_tokens")),
+                "output_tokens": final_output
+                + cls._int_or_zero(reasoning_usage.get("output_tokens"))
+                + cls._int_or_zero(steps_usage.get("output_tokens")),
+                "total_tokens": cls._int_or_zero(total_tokens),
+                "reasoning_tokens_api": final_reasoning_api
+                + cls._int_or_zero(reasoning_usage.get("reasoning_tokens_api"))
+                + cls._int_or_zero(steps_usage.get("reasoning_tokens_api")),
+            },
+            "final": {
+                "input_tokens": final_input,
+                "output_tokens": final_output,
+                "total_tokens": final_total,
+                "reasoning_tokens_api": final_reasoning_api,
+            },
+            "reasoning_pipeline": {
+                "input_tokens": cls._int_or_zero(reasoning_usage.get("input_tokens")),
+                "output_tokens": cls._int_or_zero(reasoning_usage.get("output_tokens")),
+                "total_tokens": reasoning_total,
+                "reasoning_tokens_api": cls._int_or_zero(reasoning_usage.get("reasoning_tokens_api")),
+            },
+            "steps_pipeline": {
+                "input_tokens": cls._int_or_zero(steps_usage.get("input_tokens")),
+                "output_tokens": cls._int_or_zero(steps_usage.get("output_tokens")),
+                "total_tokens": steps_total,
+                "reasoning_tokens_api": cls._int_or_zero(steps_usage.get("reasoning_tokens_api")),
+            },
+        }
+
     # ------------------------------------------------------------------
     # Core chat entry points
     # ------------------------------------------------------------------
@@ -541,6 +612,15 @@ class UltraGPT:
             details_dict["steps_pipeline_reasoning_texts"] = steps_usage.get("reasoning_texts")
             details_dict.setdefault("reasoning_text", steps_usage.get("reasoning_text"))
         total_tokens = reasoning_tokens + steps_tokens + tokens
+        details_dict["token_usage"] = self._build_token_usage(
+            total_tokens=total_tokens,
+            final_tokens=tokens,
+            final_details=final_details,
+            reasoning_tokens=reasoning_tokens,
+            steps_tokens=steps_tokens,
+            reasoning_usage=reasoning_usage,
+            steps_usage=steps_usage,
+        )
 
         if self.verbose:
             self.log.debug("=" * 50)
@@ -617,6 +697,8 @@ class UltraGPT:
         steps_output: Dict[str, Any] = {"steps": [], "conclusion": ""}
         steps_tokens = 0
         steps_tools_used: List[Dict[str, Any]] = []
+        reasoning_usage: Dict[str, Any] = {}
+        steps_usage: Dict[str, Any] = {}
 
         if reasoning_pipeline or steps_pipeline:
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -665,10 +747,12 @@ class UltraGPT:
                         reasoning_output = result
                         reasoning_tokens = tokens
                         reasoning_tools_used = details.get("tools_used", [])
+                        reasoning_usage = details.get("usage", {}) or {}
                     else:
                         steps_output = result
                         steps_tokens = tokens
                         steps_tools_used = details.get("tools_used", [])
+                        steps_usage = details.get("usage", {}) or {}
 
         conclusion = steps_output.get("conclusion", "")
         combined_prompt = None
@@ -716,6 +800,27 @@ class UltraGPT:
             # Include reasoning_details for tool call continuity (OpenRouter normalized format)
             "reasoning_details": final_details.get("reasoning_details") or response_message.get("reasoning_details"),
         }
+        details_dict["reasoning_pipeline_input_tokens"] = int(reasoning_usage.get("input_tokens", 0))
+        details_dict["reasoning_pipeline_output_tokens"] = int(reasoning_usage.get("output_tokens", 0))
+        details_dict["reasoning_pipeline_total_tokens"] = int(reasoning_usage.get("total_tokens", reasoning_tokens))
+        details_dict["reasoning_pipeline_reasoning_tokens_api"] = int(
+            reasoning_usage.get("reasoning_tokens_api", 0)
+        )
+        details_dict["steps_pipeline_input_tokens"] = int(steps_usage.get("input_tokens", 0))
+        details_dict["steps_pipeline_output_tokens"] = int(steps_usage.get("output_tokens", 0))
+        details_dict["steps_pipeline_total_tokens"] = int(steps_usage.get("total_tokens", steps_tokens))
+        details_dict["steps_pipeline_reasoning_tokens_api"] = int(
+            steps_usage.get("reasoning_tokens_api", 0)
+        )
+        details_dict["token_usage"] = self._build_token_usage(
+            total_tokens=total_tokens,
+            final_tokens=tokens,
+            final_details=final_details,
+            reasoning_tokens=reasoning_tokens,
+            steps_tokens=steps_tokens,
+            reasoning_usage=reasoning_usage,
+            steps_usage=steps_usage,
+        )
 
         simplified_response: Any
         if response_message.get("tool_calls"):

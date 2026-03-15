@@ -834,6 +834,9 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         usage_meta = getattr(msg, "usage_metadata", None)
         if isinstance(usage_meta, dict):
             try:
+                total_tokens = int(usage_meta.get("total_tokens", 0))
+                if total_tokens > 0:
+                    return total_tokens
                 return int(usage_meta.get("input_tokens", 0)) + int(usage_meta.get("output_tokens", 0))
             except Exception:  # noqa: BLE001
                 pass
@@ -841,8 +844,21 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         # Fallback to response_metadata
         response_meta = getattr(msg, "response_metadata", None)
         if isinstance(response_meta, dict):
+            token_usage = response_meta.get("token_usage", {}) or {}
+            try:
+                total_tokens = int(token_usage.get("total_tokens", 0))
+                if total_tokens > 0:
+                    return total_tokens
+                return int(token_usage.get("prompt_tokens", 0)) + int(
+                    token_usage.get("completion_tokens", 0)
+                )
+            except Exception:  # noqa: BLE001
+                pass
             usage = response_meta.get("usage", {}) or {}
             try:
+                total_tokens = int(usage.get("total_tokens", 0))
+                if total_tokens > 0:
+                    return total_tokens
                 return int(usage.get("prompt_tokens", 0)) + int(usage.get("completion_tokens", 0))
             except Exception:  # noqa: BLE001
                 pass
