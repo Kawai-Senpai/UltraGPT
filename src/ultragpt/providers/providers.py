@@ -19,9 +19,10 @@ import logging
 import random
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from pydantic import BaseModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, SystemMessage
@@ -1636,6 +1637,23 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         return self.chat_completion_with_schema_via_tools(messages, schema, model, temperature, max_tokens, deepthink)
 
 
+@dataclass
+class ModelAttemptError:
+    model: str
+    error_type: str
+    message: str
+
+
+class ModelFallbackError(RuntimeError):
+    def __init__(self, primary_model: str, attempts: List[ModelAttemptError]):
+        self.primary_model = primary_model
+        self.attempts = attempts
+        summary = " | ".join(
+            f"{attempt.model}: {attempt.error_type}: {attempt.message}" for attempt in attempts
+        )
+        super().__init__(f"All models failed. Primary={primary_model}. Attempts={summary}")
+
+
 class ProviderManager:
     """Registry facade for providers with centralized truncation and cleanup."""
 
@@ -1675,6 +1693,99 @@ class ProviderManager:
             return base, suffix
 
         return cleaned, None
+
+    def _should_try_fallback(self, err: Exception) -> bool:
+        text = str(err).lower()
+
+        if is_rate_limit_error(err):
+            return True
+
+        transient_markers = [
+            "rate limit",
+            "timeout",
+            "timed out",
+            "connection",
+            "temporarily unavailable",
+            "internal server error",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+            "stream error",
+            "overloaded",
+            "api error",
+        ]
+        if any(marker in text for marker in transient_markers):
+            return True
+
+        status_code = getattr(err, "status_code", None) or getattr(err, "code", None)
+        if status_code in {408, 409, 429, 500, 502, 503, 504}:
+            return True
+
+        hard_fail_markers = [
+            "invalid api key",
+            "missing authentication",
+            "authentication",
+            "unauthorized",
+            "permission",
+        ]
+        if any(marker in text for marker in hard_fail_markers):
+            return False
+
+        return True
+
+    def _run_with_model_fallbacks(
+        self,
+        *,
+        primary_model: str,
+        fallback_models: Optional[List[str]],
+        runner: Callable[[str], Tuple[Any, int, Dict[str, Any]]],
+    ) -> Tuple[Any, int, Dict[str, Any]]:
+        models = [primary_model]
+        for candidate in fallback_models or []:
+            if candidate and candidate != primary_model:
+                models.append(candidate)
+
+        attempts: List[ModelAttemptError] = []
+
+        for idx, candidate in enumerate(models):
+            try:
+                result, tokens, details = runner(candidate)
+                details_dict = dict(details) if isinstance(details, dict) else {}
+                details_dict["selected_model"] = candidate
+                details_dict["fallback_used"] = idx > 0
+                details_dict["attempted_models"] = models[: idx + 1]
+                if attempts:
+                    details_dict["fallback_failures"] = [
+                        {
+                            "model": attempt.model,
+                            "error_type": attempt.error_type,
+                            "message": attempt.message,
+                        }
+                        for attempt in attempts
+                    ]
+                return result, tokens, details_dict
+            except Exception as exc:
+                attempts.append(
+                    ModelAttemptError(
+                        model=candidate,
+                        error_type=type(exc).__name__,
+                        message=str(exc),
+                    )
+                )
+
+                is_last = idx == len(models) - 1
+                if is_last or not self._should_try_fallback(exc):
+                    raise ModelFallbackError(primary_model=primary_model, attempts=attempts) from exc
+
+                if self._log:
+                    self._log.warning(
+                        "Model %s failed, trying fallback %s: %s",
+                        candidate,
+                        models[idx + 1],
+                        exc,
+                    )
+
+        raise ModelFallbackError(primary_model=primary_model, attempts=attempts)
 
     # Backward-compat alias so any external callers / tests still work.
     @staticmethod
@@ -1827,18 +1938,26 @@ class ProviderManager:
         input_truncation: Optional[Union[str, int]] = None,
         keep_newest: bool = True,
         reserve_ratio: Optional[float] = None,
+        fallback_models: Optional[List[str]] = None,
     ) -> Tuple[str, int, Dict[str, Any]]:
-        provider_name, model_name, deepthink = self._normalize_model_for_request(model, deepthink)
-        provider = self.get_provider(provider_name)
-        prepared = self._prepare_messages(
-            provider_name,
-            model_name,
-            messages,
-            input_truncation=input_truncation,
-            keep_newest=keep_newest,
-            reserve_ratio=reserve_ratio,
+        def runner(active_model: str) -> Tuple[str, int, Dict[str, Any]]:
+            provider_name, model_name, active_deepthink = self._normalize_model_for_request(active_model, deepthink)
+            provider = self.get_provider(provider_name)
+            prepared = self._prepare_messages(
+                provider_name,
+                model_name,
+                messages,
+                input_truncation=input_truncation,
+                keep_newest=keep_newest,
+                reserve_ratio=reserve_ratio,
+            )
+            return provider.chat_completion(prepared, model_name, temperature, max_tokens, active_deepthink)
+
+        return self._run_with_model_fallbacks(
+            primary_model=model,
+            fallback_models=fallback_models,
+            runner=runner,
         )
-        return provider.chat_completion(prepared, model_name, temperature, max_tokens, deepthink)
 
     def chat_completion_with_schema(
         self,
@@ -1852,18 +1971,33 @@ class ProviderManager:
         input_truncation: Optional[Union[str, int]] = None,
         keep_newest: bool = True,
         reserve_ratio: Optional[float] = None,
+        fallback_models: Optional[List[str]] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
-        provider_name, model_name, deepthink = self._normalize_model_for_request(model, deepthink)
-        provider = self.get_provider(provider_name)
-        prepared = self._prepare_messages(
-            provider_name,
-            model_name,
-            messages,
-            input_truncation=input_truncation,
-            keep_newest=keep_newest,
-            reserve_ratio=reserve_ratio,
+        def runner(active_model: str) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
+            provider_name, model_name, active_deepthink = self._normalize_model_for_request(active_model, deepthink)
+            provider = self.get_provider(provider_name)
+            prepared = self._prepare_messages(
+                provider_name,
+                model_name,
+                messages,
+                input_truncation=input_truncation,
+                keep_newest=keep_newest,
+                reserve_ratio=reserve_ratio,
+            )
+            return provider.chat_completion_with_schema(
+                prepared,
+                schema,
+                model_name,
+                temperature,
+                max_tokens,
+                active_deepthink,
+            )
+
+        return self._run_with_model_fallbacks(
+            primary_model=model,
+            fallback_models=fallback_models,
+            runner=runner,
         )
-        return provider.chat_completion_with_schema(prepared, schema, model_name, temperature, max_tokens, deepthink)
 
     def chat_completion_with_tools(
         self,
@@ -1879,26 +2013,34 @@ class ProviderManager:
         input_truncation: Optional[Union[str, int]] = None,
         keep_newest: bool = True,
         reserve_ratio: Optional[float] = None,
+        fallback_models: Optional[List[str]] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
-        provider_name, model_name, deepthink = self._normalize_model_for_request(model, deepthink)
-        provider = self.get_provider(provider_name)
-        prepared = self._prepare_messages(
-            provider_name,
-            model_name,
-            messages,
-            input_truncation=input_truncation,
-            keep_newest=keep_newest,
-            reserve_ratio=reserve_ratio,
-        )
-        return provider.chat_completion_with_tools(
-            prepared,
-            tools,
-            model_name,
-            temperature,
-            max_tokens,
-            parallel_tool_calls,
-            deepthink,
-            tool_choice,
+        def runner(active_model: str) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
+            provider_name, model_name, active_deepthink = self._normalize_model_for_request(active_model, deepthink)
+            provider = self.get_provider(provider_name)
+            prepared = self._prepare_messages(
+                provider_name,
+                model_name,
+                messages,
+                input_truncation=input_truncation,
+                keep_newest=keep_newest,
+                reserve_ratio=reserve_ratio,
+            )
+            return provider.chat_completion_with_tools(
+                prepared,
+                tools,
+                model_name,
+                temperature,
+                max_tokens,
+                parallel_tool_calls,
+                active_deepthink,
+                tool_choice,
+            )
+
+        return self._run_with_model_fallbacks(
+            primary_model=model,
+            fallback_models=fallback_models,
+            runner=runner,
         )
 
 __all__ = [

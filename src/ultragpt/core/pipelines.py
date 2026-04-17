@@ -65,6 +65,7 @@ class PipelineRunner:
         max_tokens: Optional[int],
         input_truncation: Optional[int],
         deepthink: Optional[bool],
+        fallback_models: Optional[List[str]] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         active_model = steps_model if steps_model else model
 
@@ -95,6 +96,7 @@ class PipelineRunner:
             max_tokens=max_tokens,
             input_truncation=input_truncation,
             deepthink=deepthink,
+            fallback_models=fallback_models,
         )
         step_input_tokens = int(steps_details.get("input_tokens", 0))
         step_output_tokens = int(steps_details.get("output_tokens", 0))
@@ -136,6 +138,7 @@ class PipelineRunner:
                 max_tokens=max_tokens,
                 input_truncation=input_truncation,
                 deepthink=deepthink,
+                fallback_models=fallback_models,
             )
             if self._verbose:
                 self._log.debug("Step %d response preview: %s", idx, step_response[:100])
@@ -169,6 +172,7 @@ class PipelineRunner:
             max_tokens=max_tokens,
             input_truncation=input_truncation,
             deepthink=deepthink,
+            fallback_models=fallback_models,
         )
         conclusion_input = int(conclusion_details.get("input_tokens", 0))
         conclusion_output = int(conclusion_details.get("output_tokens", 0))
@@ -220,6 +224,7 @@ class PipelineRunner:
         max_tokens: Optional[int],
         input_truncation: Optional[int],
         deepthink: Optional[bool],
+        fallback_models: Optional[List[str]] = None,
     ) -> Tuple[List[str], int, Dict[str, Any]]:
         active_model = reasoning_model if reasoning_model else model
 
@@ -260,6 +265,7 @@ class PipelineRunner:
                 max_tokens=max_tokens,
                 input_truncation=input_truncation,
                 deepthink=deepthink,
+                fallback_models=fallback_models,
             )
             iteration_input_tokens = int(iteration_details.get("input_tokens", 0))
             iteration_output_tokens = int(iteration_details.get("output_tokens", 0))

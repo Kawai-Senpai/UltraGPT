@@ -72,6 +72,7 @@ class UltraGPT:
         max_tokens: Optional[int] = None,
         input_truncation: Union[str, int] = None,
         reserve_ratio: Optional[float] = None,
+        fallback_models: Optional[List[str]] = None,
         verbose: bool = False,
         logger_name: str = "ultragpt",
         logger_filename: str = "debug/ultragpt.log",
@@ -109,6 +110,7 @@ class UltraGPT:
         self.max_tokens = max_tokens
         self.input_truncation = input_truncation if input_truncation is not None else config.DEFAULT_INPUT_TRUNCATION
         self.reserve_ratio = reserve_ratio if reserve_ratio is not None else config.DEFAULT_RESERVE_RATIO
+        self.default_fallback_models = list(fallback_models) if fallback_models else None
 
         self.log = logger(
             name=logger_name,
@@ -170,6 +172,7 @@ class UltraGPT:
             return int(value)
         except (TypeError, ValueError):
             return 0
+
 
     @classmethod
     def _build_token_usage(
@@ -250,9 +253,15 @@ class UltraGPT:
         input_truncation: Optional[Union[str, int]] = None,
         deepthink: Optional[bool] = None,
         reserve_ratio: Optional[float] = None,
+        fallback_models: Optional[List[str]] = None,
     ) -> Tuple[str, int, Dict[str, Any]]:
         tools = tools or []
         tools_config = tools_config or {}
+        effective_fallback_models = (
+            self.default_fallback_models
+            if fallback_models is None
+            else (list(fallback_models) if fallback_models else None)
+        )
         return self.chat_flow.chat_with_ai_sync(
             messages,
             model=model,
@@ -263,6 +272,7 @@ class UltraGPT:
             input_truncation=input_truncation,
             deepthink=deepthink,
             reserve_ratio=reserve_ratio,
+            fallback_models=effective_fallback_models,
         )
 
     def chat_with_model_parse(
@@ -277,11 +287,17 @@ class UltraGPT:
         input_truncation: Optional[Union[str, int]] = None,
         deepthink: Optional[bool] = None,
         reserve_ratio: Optional[float] = None,
+        fallback_models: Optional[List[str]] = None,
     ) -> Tuple[Any, int, Dict[str, Any]]:
         model = model or config.DEFAULT_PARSE_MODEL
         temperature = temperature if temperature is not None else config.DEFAULT_TEMPERATURE
         tools = tools or []
         tools_config = tools_config or {}
+        effective_fallback_models = (
+            self.default_fallback_models
+            if fallback_models is None
+            else (list(fallback_models) if fallback_models else None)
+        )
         return self.chat_flow.chat_with_model_parse(
             messages,
             schema=schema,
@@ -293,6 +309,7 @@ class UltraGPT:
             input_truncation=input_truncation,
             deepthink=deepthink,
             reserve_ratio=reserve_ratio,
+            fallback_models=effective_fallback_models,
         )
 
     def chat_with_model_tools(
@@ -308,11 +325,17 @@ class UltraGPT:
         parallel_tool_calls: Optional[bool] = None,
         deepthink: Optional[bool] = None,
         reserve_ratio: Optional[float] = None,
+        fallback_models: Optional[List[str]] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         model = model or config.DEFAULT_MODEL
         temperature = temperature if temperature is not None else config.DEFAULT_TEMPERATURE
         tools = tools or []
         tools_config = tools_config or {}
+        effective_fallback_models = (
+            self.default_fallback_models
+            if fallback_models is None
+            else (list(fallback_models) if fallback_models else None)
+        )
 
         validated_tools = self.tool_manager.validate_user_tools(user_tools)
         # Use rich tool prompt with allow_multiple based on parallel_tool_calls
@@ -332,6 +355,7 @@ class UltraGPT:
             parallel_tool_calls=parallel_tool_calls,
             deepthink=deepthink,
             reserve_ratio=reserve_ratio,
+            fallback_models=effective_fallback_models,
         )
 
     def _build_tool_instruction_prompt(self, tools: List[Dict[str, Any]], allow_multiple: bool = True) -> Optional[str]:
@@ -368,8 +392,14 @@ class UltraGPT:
         max_tokens: Optional[int] = None,
         input_truncation: Optional[Union[str, int]] = None,
         deepthink: Optional[bool] = None,
+        fallback_models: Optional[List[str]] = None,
     ):
         base_messages = self._ensure_lc_messages(messages)
+        effective_fallback_models = (
+            self.default_fallback_models
+            if fallback_models is None
+            else (list(fallback_models) if fallback_models else None)
+        )
         return self.pipeline_runner.run_steps_pipeline(
             base_messages,
             model,
@@ -380,6 +410,7 @@ class UltraGPT:
             max_tokens=max_tokens,
             input_truncation=input_truncation,
             deepthink=deepthink,
+            fallback_models=effective_fallback_models,
         )
 
     def run_reasoning_pipeline(
@@ -394,8 +425,14 @@ class UltraGPT:
         max_tokens: Optional[int] = None,
         input_truncation: Optional[Union[str, int]] = None,
         deepthink: Optional[bool] = None,
+        fallback_models: Optional[List[str]] = None,
     ):
         base_messages = self._ensure_lc_messages(messages)
+        effective_fallback_models = (
+            self.default_fallback_models
+            if fallback_models is None
+            else (list(fallback_models) if fallback_models else None)
+        )
         return self.pipeline_runner.run_reasoning_pipeline(
             base_messages,
             model,
@@ -407,6 +444,7 @@ class UltraGPT:
             max_tokens=max_tokens,
             input_truncation=input_truncation,
             deepthink=deepthink,
+            fallback_models=effective_fallback_models,
         )
 
     # ------------------------------------------------------------------
@@ -429,6 +467,7 @@ class UltraGPT:
         reasoning_model: str = None,
         tools: list = None,
         tools_config: dict = None,
+        fallback_models: Optional[List[str]] = None,
     ) -> Tuple[Any, int, Dict[str, Any]]:
         
         model = model or config.DEFAULT_MODEL
@@ -438,6 +477,11 @@ class UltraGPT:
         reasoning_model = reasoning_model or config.DEFAULT_REASONING_MODEL
         tools = tools if tools is not None else config.DEFAULT_TOOLS
         tools_config = tools_config if tools_config is not None else config.TOOLS_CONFIG.copy()
+        effective_fallback_models = (
+            self.default_fallback_models
+            if fallback_models is None
+            else (list(fallback_models) if fallback_models else None)
+        )
 
         base_messages = self._ensure_lc_messages(messages)
 
@@ -494,6 +538,7 @@ class UltraGPT:
                                 max_tokens=max_tokens,
                                 input_truncation=input_truncation,
                                 deepthink=False,
+                                fallback_models=effective_fallback_models,
                             ),
                         )
                     )
@@ -512,6 +557,7 @@ class UltraGPT:
                                 max_tokens=max_tokens,
                                 input_truncation=input_truncation,
                                 deepthink=False,
+                                fallback_models=effective_fallback_models,
                             ),
                         )
                     )
@@ -554,6 +600,7 @@ class UltraGPT:
                 input_truncation=input_truncation,
                 deepthink=final_deepthink,
                 reserve_ratio=reserve_ratio,
+                fallback_models=effective_fallback_models,
             )
         else:
             final_output, tokens, final_details = self.chat_with_ai_sync(
@@ -566,6 +613,7 @@ class UltraGPT:
                 input_truncation=input_truncation,
                 deepthink=final_deepthink,
                 reserve_ratio=reserve_ratio,
+                fallback_models=effective_fallback_models,
             )
 
         if steps_list:
@@ -661,6 +709,7 @@ class UltraGPT:
         tools: list = None,
         tools_config: dict = None,
         max_tokens: Optional[int] = None,
+        fallback_models: Optional[List[str]] = None,
     ) -> Tuple[Any, int, Dict[str, Any]]:
     
         model = model or config.DEFAULT_MODEL
@@ -670,6 +719,11 @@ class UltraGPT:
         reasoning_model = reasoning_model or config.DEFAULT_REASONING_MODEL
         tools = tools or config.DEFAULT_TOOLS
         tools_config = tools_config or config.TOOLS_CONFIG
+        effective_fallback_models = (
+            self.default_fallback_models
+            if fallback_models is None
+            else (list(fallback_models) if fallback_models else None)
+        )
 
         validated_tools = self.tool_manager.validate_user_tools(user_tools)
         tool_prompt = (
@@ -719,6 +773,7 @@ class UltraGPT:
                                 max_tokens=max_tokens,
                                 input_truncation=input_truncation,
                                 deepthink=False,
+                                fallback_models=effective_fallback_models,
                             ),
                         )
                     )
@@ -737,6 +792,7 @@ class UltraGPT:
                                 max_tokens=max_tokens,
                                 input_truncation=input_truncation,
                                 deepthink=False,
+                                fallback_models=effective_fallback_models,
                             ),
                         )
                     )
@@ -778,6 +834,7 @@ class UltraGPT:
             parallel_tool_calls=parallel_calls,
             deepthink=final_deepthink,
             reserve_ratio=reserve_ratio,
+            fallback_models=effective_fallback_models,
         )
 
         total_tokens = reasoning_tokens + steps_tokens + tokens
