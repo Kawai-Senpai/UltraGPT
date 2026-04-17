@@ -6,7 +6,7 @@
 
 **The "Write Once, Run Everywhere" AI library that handles ALL the heavy lifting**
 
-[![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE.rst)
 [![OpenRouter](https://img.shields.io/badge/OpenRouter-Universal%20Access-orange.svg)](https://openrouter.ai)
 
@@ -80,6 +80,15 @@ One API key, ALL models:
 
 ---
 
+## 🆕 What's New in v7.6.0
+
+- **OpenAI streaming compatibility hardening**: structured-output calls now gracefully recover from known client-side streaming serialization failures.
+- **Model fallback chains**: optional `fallback_models` support is now threaded through chat, schema, and tool-call paths.
+- **Strict schema-fallback behavior**: tool-based structured-output fallbacks now raise explicit parse errors instead of fabricating empty schema objects.
+- **Packaging alignment**: Python support is now documented and packaged as **3.10+**, aligned with current LangChain dependency minimums.
+
+---
+
 ## 📦 Installation
 
 ```bash
@@ -87,7 +96,7 @@ pip install ultragpt
 ```
 
 ### Requirements
-- Python 3.9+
+- Python 3.10+
 - OpenRouter API key (get one at [openrouter.ai/keys](https://openrouter.ai/keys))
 
 ---
@@ -399,6 +408,11 @@ ultra = UltraGPT(
     # Token Management
     max_tokens=4096,           # Max output tokens
     input_truncation="AUTO",   # "AUTO", "OFF", or int
+
+    # Model Fallbacks (Optional)
+    # None or [] = disabled
+    # Example: ["openai/gpt-4.1", "claude-sonnet-4.5"]
+    fallback_models=None,
     
     # Logging
     verbose=True,              # Show detailed logs
@@ -435,7 +449,34 @@ response, tokens, details = ultra.chat(
     
     # Token Management
     input_truncation="AUTO",    # Override instance setting
+
+    # Optional per-call fallback chain
+    # None uses instance default, [] disables for this call
+    fallback_models=["openai/gpt-4.1"],
 )
+```
+
+### Model Fallbacks
+```python
+# Fallbacks disabled by default
+ultra = UltraGPT(openrouter_api_key="...")
+
+# Set defaults at initialization
+ultra_with_fallbacks = UltraGPT(
+    openrouter_api_key="...",
+    fallback_models=["openai/gpt-4.1", "claude-sonnet-4.5"],
+)
+
+# Disable fallback for one critical call
+response, tokens, details = ultra_with_fallbacks.chat(
+    messages=[{"role": "user", "content": "Summarize this contract."}],
+    model="gpt-5",
+    fallback_models=[],
+)
+
+print(details.get("selected_model"))
+print(details.get("fallback_used"))
+print(details.get("attempted_models"))
 ```
 
 ---
@@ -463,6 +504,12 @@ print(f"Reasoning details: {details.get('reasoning_details')}")
 
 # Tools used
 print(f"Tools called: {details.get('tools_used')}")
+
+# Fallback metadata (when fallback_models is configured)
+print(f"Selected model: {details.get('selected_model')}")
+print(f"Fallback used: {details.get('fallback_used')}")
+print(f"Attempted models: {details.get('attempted_models')}")
+print(f"Fallback failures: {details.get('fallback_failures')}")
 ```
 
 ---

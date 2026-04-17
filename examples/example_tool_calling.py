@@ -1,31 +1,33 @@
 #!/usr/bin/env python3
-"""
-Example 3: Tool Calling
-Demonstrates native tool calling with custom tools
+"""Example 3: Tool Calling.
+
+Demonstrates robust handling of all `tool_call()` response shapes:
+- tool calls only,
+- tool calls + assistant text,
+- text-only fallback.
 """
 
-import os
 import json
+import os
+from typing import Any, Dict, List, Tuple
+
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+
 from ultragpt import UltraGPT
 
-# Load API key
-load_dotenv()
 
-# Define tool parameter schemas
 class CalculatorParams(BaseModel):
-    """Calculator parameters"""
     operation: str = Field(description="Operation: add, subtract, multiply, divide")
     a: float = Field(description="First number")
     b: float = Field(description="Second number")
 
+
 class WeatherParams(BaseModel):
-    """Weather lookup parameters"""
     location: str = Field(description="City name or location")
     units: str = Field(description="Units: celsius or fahrenheit", default="celsius")
 
-# Define tools
+
 calculator_tool = {
     "name": "calculator",
     "description": "Performs basic arithmetic operations on two numbers",
@@ -42,77 +44,103 @@ weather_tool = {
     "when_to_use": "When user asks about weather, temperature, or climate",
 }
 
-# Initialize
-ultra = UltraGPT(
-    openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
-    verbose=True
-)
 
-print("=" * 70)
-print("TOOL CALLING EXAMPLE")
-print("=" * 70)
+def require_openrouter_key() -> str:
+    key = os.getenv("OPENROUTER_API_KEY")
+    if key:
+        return key
+    raise RuntimeError("Missing OPENROUTER_API_KEY in environment or .env")
 
-# Example 1: Single tool call
-print("\n1. Single Tool Call (Calculator):")
-response, tokens, details = ultra.tool_call(
-    messages=[{"role": "user", "content": "Calculate 25 * 8"}],
-    user_tools=[calculator_tool],
-    model="gpt-5",
-    allow_multiple=False  # Only one tool call
-)
-print(f"Tool called: {response['function']['name']}")
-args = json.loads(response['function']['arguments'])
-print(f"Arguments: {json.dumps(args, indent=2)}")
-print(f"Tokens: {tokens}")
 
-# Example 2: Multiple tool calls
-print("\n2. Multiple Tool Calls:")
-response, tokens, details = ultra.tool_call(
-    messages=[{"role": "user", "content": "Add 10 and 5, then multiply 3 by 7"}],
-    user_tools=[calculator_tool],
-    model="gpt-5",
-    allow_multiple=True  # Returns array of tool calls
-)
-print(f"Number of tool calls: {len(response)}")
-for i, call in enumerate(response, 1):
-    print(f"\nCall {i}:")
-    print(f"  Tool: {call['function']['name']}")
-    args = json.loads(call['function']['arguments'])
-    print(f"  Arguments: {json.dumps(args, indent=2)}")
+def normalize_tool_response(payload: Any) -> Tuple[List[Dict[str, Any]], str]:
+    if isinstance(payload, list):
+        return payload, ""
+    if isinstance(payload, dict):
+        tool_calls = payload.get("tool_calls", [])
+        content = payload.get("content", "") or ""
+        if isinstance(tool_calls, list):
+            return tool_calls, content
+        return [], content
+    return [], str(payload)
 
-# Example 3: Tool selection
-print("\n3. Tool Selection (Weather vs Calculator):")
-response, tokens, details = ultra.tool_call(
-    messages=[{"role": "user", "content": "What's the weather in Paris?"}],
-    user_tools=[calculator_tool, weather_tool],
-    model="gpt-5"
-)
-tool_name = response[0]['function']['name'] if isinstance(response, list) else response['function']['name']
-print(f"Model correctly selected: {tool_name}")
-print(f"Tokens: {tokens}")
 
-# Example 4: Tool calling with Claude
-print("\n4. Tool Calling with Claude:")
-response, tokens, details = ultra.tool_call(
-    messages=[{"role": "user", "content": "Divide 100 by 4"}],
-    user_tools=[calculator_tool],
-    model="claude:sonnet"
-)
-print(f"Tool: {response['function']['name']}")
-args = json.loads(response['function']['arguments'])
-print(f"Arguments: {json.dumps(args, indent=2)}")
-print(f"Tokens: {tokens}")
+def print_tool_calls(payload: Any) -> None:
+    tool_calls, content = normalize_tool_response(payload)
+    if content.strip():
+        print(f"Assistant text: {content}")
 
-# Example 5: Tool calling with native reasoning
-print("\n5. Tool Calling + Native Reasoning:")
-response, tokens, details = ultra.tool_call(
-    messages=[{"role": "user", "content": "Use calculator to find 15% of 240"}],
-    user_tools=[calculator_tool],
-    model="claude:sonnet",
-    reasoning_pipeline=True  # Auto-detects native thinking
-)
-print(f"Tool: {response['function']['name']}")
-print(f"Reasoning tokens (API): {details.get('reasoning_tokens_api', 0)}")
-print(f"Has reasoning_details: {'reasoning_details' in details}")
+    if not tool_calls:
+        print("No tool calls returned.")
+        return
 
-print("\n✓ Tool calling works uniformly across all providers!")
+    print(f"Tool calls returned: {len(tool_calls)}")
+    for i, call in enumerate(tool_calls, start=1):
+        fn = call.get("function", {})
+        fn_name = fn.get("name", "<unknown>")
+        raw_args = fn.get("arguments", "{}")
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except Exception:  # noqa: BLE001
+            args = raw_args
+        print(f"  {i}. {fn_name} -> {args}")
+
+
+def main() -> None:
+    load_dotenv()
+
+    ultra = UltraGPT(
+        openrouter_api_key=require_openrouter_key(),
+        fallback_models=["openai/gpt-4.1"],
+        verbose=True,
+    )
+
+    print("=" * 70)
+    print("TOOL CALLING EXAMPLE")
+    print("=" * 70)
+
+    print("\n1. Single Tool Call (Calculator)")
+    response, tokens, details = ultra.tool_call(
+        messages=[{"role": "user", "content": "Calculate 25 * 8"}],
+        user_tools=[calculator_tool],
+        model="gpt-5",
+        allow_multiple=False,
+    )
+    print_tool_calls(response)
+    print(f"Tokens: {tokens}")
+    print(f"Selected model: {details.get('selected_model')}")
+
+    print("\n2. Multiple Tool Calls")
+    response, tokens, details = ultra.tool_call(
+        messages=[{"role": "user", "content": "Add 10 and 5, then multiply 3 by 7"}],
+        user_tools=[calculator_tool],
+        model="gpt-5",
+        allow_multiple=True,
+    )
+    print_tool_calls(response)
+    print(f"Tokens: {tokens}")
+
+    print("\n3. Tool Selection (Weather vs Calculator)")
+    response, tokens, details = ultra.tool_call(
+        messages=[{"role": "user", "content": "What's the weather in Paris?"}],
+        user_tools=[calculator_tool, weather_tool],
+        model="gpt-5",
+    )
+    print_tool_calls(response)
+    print(f"Tokens: {tokens}")
+
+    print("\n4. Tool Calling + Native Reasoning")
+    response, tokens, details = ultra.tool_call(
+        messages=[{"role": "user", "content": "Use calculator to find 15% of 240"}],
+        user_tools=[calculator_tool],
+        model="claude:sonnet",
+        reasoning_pipeline=True,
+    )
+    print_tool_calls(response)
+    print(f"Reasoning tokens (API): {details.get('reasoning_tokens_api', 0)}")
+    print(f"Has reasoning_details: {'reasoning_details' in details}")
+
+    print("\n✓ Tool calling works uniformly across all providers and response shapes.")
+
+
+if __name__ == "__main__":
+    main()
