@@ -262,7 +262,7 @@ class ToolManager:
             
             # Make native tool call
             try:
-                response_message, tokens = self.provider_manager.chat_completion_with_tools(
+                response_message, tokens, _usage_details = self.provider_manager.chat_completion_with_tools(
                     model=model,
                     messages=tool_messages,
                     tools=native_tools,

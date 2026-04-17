@@ -41,6 +41,8 @@ logger = logging.getLogger(__name__)
 
 _openai_modules_warmed = False
 _openai_warm_lock = threading.Lock()
+_structured_stream_disabled = False
+_structured_stream_lock = threading.Lock()
 
 def _warm_openai_modules() -> None:
     """Preload OpenAI modules to avoid ModuleLock contention under threading."""
@@ -1026,8 +1028,33 @@ class BaseOpenAICompatibleProvider(BaseProvider):
             include_raw=True,
             method="json_schema",
         )
-        stream = structured_llm.stream(messages)
-        final_obj = self._accumulate_structured_stream(stream)
+        global _structured_stream_disabled
+
+        # If a prior request already proved this runtime is affected by the
+        # by_alias=None bug, skip stream mode to avoid duplicate API calls.
+        if _structured_stream_disabled:
+            final_obj = structured_llm.invoke(messages)
+        else:
+            try:
+                stream = structured_llm.stream(messages)
+                final_obj = self._accumulate_structured_stream(stream)
+            except TypeError as exc:
+                # Work around OpenAI SDK/Pydantic incompatibilities in certain
+                # streaming structured-output versions (by_alias=None issue).
+                err_text = str(exc)
+                if "by_alias" not in err_text or "NoneType" not in err_text:
+                    raise
+
+                with _structured_stream_lock:
+                    _structured_stream_disabled = True
+
+                logger.warning(
+                    "Structured streaming failed with known by_alias compatibility issue; "
+                    "falling back to non-stream invoke and disabling structured stream mode "
+                    "for this process: %s",
+                    exc,
+                )
+                final_obj = structured_llm.invoke(messages)
         parsed_dict, tokens_used = self._finalize_structured_result(final_obj)
         
         # Extract usage details from raw message if available
@@ -1106,22 +1133,53 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         
         if tool_calls:
             # Get the first tool call's arguments
-            function_args = tool_calls[0].get("function", {}).get("arguments", "{}")
-            try:
-                import json
-                parsed_dict = json.loads(function_args)
-            except Exception:
-                # If parsing fails, return empty structure
-                parsed_dict = schema().model_dump(by_alias=True)
+            tool_call = tool_calls[0]
+            tool_call_name = (
+                tool_call.get("function", {}).get("name")
+                or tool_call.get("name")
+                or tool_name
+            )
+            function_args = tool_call.get("function", {}).get("arguments", "{}")
+            if isinstance(function_args, dict):
+                parsed_dict = function_args
+            else:
+                try:
+                    import json
+                    parsed_dict = json.loads(function_args)
+                except Exception as exc:
+                    preview = str(function_args)
+                    if len(preview) > 200:
+                        preview = preview[:200] + "..."
+                    raise ValueError(
+                        "Failed to parse tool call arguments for "
+                        f"{tool_call_name} as JSON: {preview}"
+                    ) from exc
+
+            if not isinstance(parsed_dict, dict):
+                raise ValueError(
+                    "Tool call arguments did not produce an object for schema "
+                    f"{schema.__name__}: {type(parsed_dict)}"
+                )
         else:
             # Fallback: try to parse content as JSON
             content = response_message.get("content", "") or ""
             try:
                 import json
                 parsed_dict = json.loads(content)
-            except Exception:
-                # If all fails, return empty structure
-                parsed_dict = schema().model_dump(by_alias=True)
+            except Exception as exc:
+                preview = str(content)
+                if len(preview) > 200:
+                    preview = preview[:200] + "..."
+                raise ValueError(
+                    "Failed to parse structured output content for schema "
+                    f"{schema.__name__} as JSON: {preview}"
+                ) from exc
+
+            if not isinstance(parsed_dict, dict):
+                raise ValueError(
+                    "Structured output content did not produce an object for schema "
+                    f"{schema.__name__}: {type(parsed_dict)}"
+                )
         
         return parsed_dict, tokens_used, usage_details
 
@@ -1136,7 +1194,7 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         parallel_tool_calls: Optional[bool] = None,
         deepthink: Optional[bool] = None,
         tool_choice: str = "required",
-    ) -> Tuple[Dict[str, Any], int]:
+    ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         extra_body = self._build_extra_body(model, max_tokens, deepthink)
         extra_kwargs = {"extra_body": extra_body} if extra_body else {}
         
