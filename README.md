@@ -316,7 +316,7 @@ response, tokens, details = ultra.chat(
     messages=[{"role": "user", "content": "Plan a 2-week trip to Japan"}],
     model="gpt-5",
     steps_pipeline=True,
-    steps_model="gpt-5-nano",  # Use cheaper model for planning
+    steps_model="gpt-5.4-nano",  # Use cheaper model for planning
 )
 
 print(f"Steps: {details.get('steps')}")
@@ -439,8 +439,8 @@ response, tokens, details = ultra.chat(
     # Pipelines
     steps_pipeline=False,       # Enable step-by-step planning
     reasoning_pipeline=False,   # Enable multi-iteration reasoning
-    steps_model="gpt-5-nano",   # Model for steps
-    reasoning_model="gpt-5-nano", # Model for reasoning
+    steps_model="gpt-5.4-nano",   # Model for steps
+    reasoning_model="gpt-5.4-nano", # Model for reasoning
     reasoning_iterations=3,     # Reasoning depth
     
     # Tools

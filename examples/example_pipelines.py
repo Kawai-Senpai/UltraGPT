@@ -43,7 +43,7 @@ def main() -> None:
         messages=[{"role": "user", "content": "Plan a 2-week trip to Japan (Tokyo, Kyoto, Osaka)."}],
         model="gpt-5",
         steps_pipeline=True,
-        steps_model="gpt-5-nano",
+        steps_model="gpt-5.4-nano",
     )
     print(f"Final plan excerpt: {response[:300]}...")
     steps = details.get("steps", [])

@@ -1316,6 +1316,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "google/gemini-3.1-pro-preview",  # Gemini 3.1 Pro Preview (enhanced SWE + agentic perf)
         "google/gemini-3-pro-preview",  # Gemini 3 Pro Preview exposes reasoning tokens via OpenRouter
         "google/gemini-3-flash-preview",  # Gemini 3 Flash Preview exposes reasoning tokens via OpenRouter
+        "qwen/qwen3.6-plus",  # Qwen 3.6 Plus exposes reasoning tokens via OpenRouter
         "z-ai/glm",  # Z.AI GLM-5 supports thinking mode (on by default)
     ]
     
@@ -1368,8 +1369,14 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         # GPT models (explicit GPT-5.4 mappings)
         "gpt-5.4": "openai/gpt-5.4",
         "gpt-5.4-pro": "openai/gpt-5.4-pro",
+        "gpt-5.4-mini": "openai/gpt-5.4-mini",
+        "gpt-5.4-nano": "openai/gpt-5.4-nano",
         "gpt5.4": "openai/gpt-5.4",
         "gpt5.4-pro": "openai/gpt-5.4-pro",
+        "gpt5.4-mini": "openai/gpt-5.4-mini",
+        "gpt5.4-nano": "openai/gpt-5.4-nano",
+        "gpt-5-4-mini": "openai/gpt-5.4-mini",
+        "gpt-5-4-nano": "openai/gpt-5.4-nano",
         # Snapshot pinning aliases
         "gpt-5.4-2026-03-05": "openai/gpt-5.4",
         "gpt-5.4-pro-2026-03-05": "openai/gpt-5.4-pro",
@@ -1395,12 +1402,24 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "grok-4.1-fast": "x-ai/grok-4.1-fast",
         "grok-4-1-fast": "x-ai/grok-4.1-fast",
         # Z.AI / GLM models
+        "glm-5.1": "z-ai/glm-5.1",
+        "glm5.1": "z-ai/glm-5.1",
+        "glm-5-1": "z-ai/glm-5.1",
+        # Backward-compat for legacy GLM-5 names
         "glm-5": "z-ai/glm-5",
         "glm5": "z-ai/glm-5",
         # Qwen models
+        "qwen3.6-plus": "qwen/qwen3.6-plus",
+        "qwen-3.6-plus": "qwen/qwen3.6-plus",
+        "qwen3.6": "qwen/qwen3.6-plus",
+        "qwen-3.6": "qwen/qwen3.6-plus",
         "qwen3-vl-235b-a22b-instruct": "qwen/qwen3-vl-235b-a22b-instruct",
         "qwen3-vl-235b-instruct": "qwen/qwen3-vl-235b-a22b-instruct",
         "qwen3-vl-235b": "qwen/qwen3-vl-235b-a22b-instruct",
+        # Kimi models
+        "kimi-k2.6": "moonshotai/kimi-k2.6",
+        "kimi-k2-6": "moonshotai/kimi-k2.6",
+        "kimi k2.6": "moonshotai/kimi-k2.6",
         # DeepSeek models
         "deepseek-chat-v3.1": "deepseek/deepseek-chat-v3.1",
         "deepseek-v3.1": "deepseek/deepseek-chat-v3.1",
@@ -1428,8 +1447,11 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         # GPT models (OpenRouter routes to OpenAI)
         "gpt-5": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "gpt-5-pro": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        # Backward-compat for legacy GPT-5 mini/nano identifiers
         "gpt-5-mini": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "openai/gpt-5-mini": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "gpt-5-nano": {"max_input_tokens": 400000, "max_output_tokens": 128000},
+        "openai/gpt-5-nano": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "gpt-5.1": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "openai/gpt-5.1": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "gpt-5.1-chat": {"max_input_tokens": 400000, "max_output_tokens": 128000},
@@ -1444,6 +1466,10 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "openai/gpt-5.4": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
         "gpt-5.4-pro": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
         "openai/gpt-5.4-pro": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
+        "gpt-5.4-mini": {"max_input_tokens": 400_000, "max_output_tokens": 128_000},
+        "openai/gpt-5.4-mini": {"max_input_tokens": 400_000, "max_output_tokens": 128_000},
+        "gpt-5.4-nano": {"max_input_tokens": 400_000, "max_output_tokens": 128_000},
+        "openai/gpt-5.4-nano": {"max_input_tokens": 400_000, "max_output_tokens": 128_000},
         "gpt-5-chat-latest": {"max_input_tokens": 128000, "max_output_tokens": 16384},
         "gpt-4.1": {"max_input_tokens": 1_000_000, "max_output_tokens": 32768},
         "gpt-4.1-mini": {"max_input_tokens": 1_000_000, "max_output_tokens": 32768},
@@ -1478,13 +1504,25 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "grok-4.1-fast": {"max_input_tokens": 2_000_000, "max_output_tokens": 30_000},
         "x-ai/grok-4.1-fast": {"max_input_tokens": 2_000_000, "max_output_tokens": 30_000},
 
-        # Z.AI GLM-5 (202k context, 128k output per Z.AI docs / OpenRouter listing)
+        # Z.AI GLM-5 (legacy, keep for backward compatibility)
         "glm-5": {"max_input_tokens": 202_752, "max_output_tokens": 128_000},
         "z-ai/glm-5": {"max_input_tokens": 202_752, "max_output_tokens": 128_000},
+
+        # Z.AI GLM-5.1 (202k context, 65.5k output per OpenRouter listing)
+        "glm-5.1": {"max_input_tokens": 202_752, "max_output_tokens": 65_536},
+        "z-ai/glm-5.1": {"max_input_tokens": 202_752, "max_output_tokens": 65_536},
+
+        # Qwen 3.6 Plus (1M context, 65.5k output per OpenRouter listing)
+        "qwen3.6-plus": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_536},
+        "qwen/qwen3.6-plus": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_536},
 
         # Qwen3 VL (per OpenRouter listing ~131k context; keep output conservative until verified)
         "qwen3-vl-235b-a22b-instruct": {"max_input_tokens": 131_072, "max_output_tokens": 8_192},
         "qwen/qwen3-vl-235b-a22b-instruct": {"max_input_tokens": 131_072, "max_output_tokens": 8_192},
+
+        # Kimi K2.6 (262k context, 262k output per OpenRouter listing)
+        "kimi-k2.6": {"max_input_tokens": 262_144, "max_output_tokens": 262_144},
+        "moonshotai/kimi-k2.6": {"max_input_tokens": 262_144, "max_output_tokens": 262_144},
 
         # DeepSeek model
         "deepseek-chat-v3.1": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
