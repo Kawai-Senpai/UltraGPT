@@ -113,7 +113,7 @@ def combine_all_pipeline_prompts(reasons, conclusion):
 {conclusion} 
 """ if conclusion else ""
 
-    return "Here is the thought process and reasoning that have been gone through, so far. This might help you to come up with a proper answer:" + reasons_prompt + conclusion_prompt
+    return f"Here is the thought process and reasoning that have been gone through, so far. This might help you to come up with a proper answer:" + reasons_prompt + conclusion_prompt
 
 def generate_tool_call_prompt(user_tools: list, allow_multiple: bool = True) -> str:
     """Generate prompt for tool calling functionality"""

@@ -86,16 +86,16 @@ def google_search(query, api_key, search_engine_id, num_results=10):
                 'num': min(num_results, 10)
             }
             
-            debug_info.append("Making direct REST API call to Google Custom Search")
+            debug_info.append(f"Making direct REST API call to Google Custom Search")
             response = requests.get(url, params=params, timeout=20)
             response.raise_for_status()
             data = response.json()
-            debug_info.append("REST API call completed successfully")
+            debug_info.append(f"REST API call completed successfully")
             
         else:
             debug_info.append("Standard environment - using Google API client")
             service = build("customsearch", "v1", developerKey=api_key)
-            debug_info.append("Service built successfully")
+            debug_info.append(f"Service built successfully")
             
             debug_info.append(f"Executing search for query: '{query}' with {num_results} results")
             data = (
@@ -103,7 +103,7 @@ def google_search(query, api_key, search_engine_id, num_results=10):
                 .list(q=query, cx=search_engine_id, num=min(num_results, 10))  # Google API max is 10
                 .execute()
             )
-            debug_info.append("API call completed successfully")
+            debug_info.append(f"API call completed successfully")
         
         items = data.get("items", [])
         total_results = data.get("searchInformation", {}).get("totalResults", "0")

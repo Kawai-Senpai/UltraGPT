@@ -14,7 +14,7 @@ import os
 import json
 import inspect
 import importlib
-from typing import List
+from typing import Any, List
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel

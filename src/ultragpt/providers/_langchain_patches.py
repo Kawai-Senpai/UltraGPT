@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from functools import wraps
-from typing import Any, Mapping, Set
+from typing import Any, List, Mapping, Set
 
 logger = logging.getLogger(__name__)
 
