@@ -393,7 +393,13 @@ class ToolManager:
                 continue
             
             # Get parameters schema and ensure it has additionalProperties: false for OpenAI strict mode
-            parameters_schema = tool_dict["parameters_schema"].copy()
+            raw_schema = tool_dict["parameters_schema"]
+            if isinstance(raw_schema, type) and issubclass(raw_schema, BaseModel):
+                parameters_schema = raw_schema.model_json_schema()
+            elif isinstance(raw_schema, dict):
+                parameters_schema = dict(raw_schema)
+            else:
+                parameters_schema = raw_schema.model_json_schema()
             
             # Normalize Pydantic v2 Optional field schemas to OpenAI-compatible format
             normalize_pydantic_optional_fields(parameters_schema)

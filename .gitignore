@@ -82,6 +82,7 @@ desktop.ini
 .dmypy.json
 dmypy.json
 .pytype/
+.ruff_cache
 
 # ----- Virtual Environments -----
 venv/
