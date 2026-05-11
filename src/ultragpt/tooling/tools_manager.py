@@ -25,6 +25,39 @@ from ..schemas import (
     prepare_schema_for_openai,
 )
 
+
+def _content_to_text(content: Any) -> str:
+    """Extract only text from plain or multimodal message content."""
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        parts: List[str] = []
+        for block in content:
+            if isinstance(block, str):
+                text = block.strip()
+                if text:
+                    parts.append(text)
+                continue
+
+            if not isinstance(block, dict):
+                continue
+
+            block_type = block.get("type")
+            if block_type in {"text", "input_text", "output_text"}:
+                text = block.get("text") or block.get("content") or ""
+                text_str = str(text).strip()
+                if text_str:
+                    parts.append(text_str)
+
+        return "\n".join(parts)
+
+    return str(content).strip()
+
+
 class ToolManager:
     """
     Manages all tool-related operations for UltraGPT.
@@ -196,8 +229,9 @@ class ToolManager:
         message = ""
         for msg in reversed(history):
             if isinstance(msg, HumanMessage) and msg.content:
-                message = str(msg.content)
-                break
+                message = _content_to_text(msg.content)
+                if message:
+                    break
         
         if not message:
             return "", tool_usage_details
@@ -243,7 +277,7 @@ class ToolManager:
                 if isinstance(context_msg, (HumanMessage, AIMessage)) and context_msg.content:
                     trimmed_context.append(context_msg)
 
-            if trimmed_context and isinstance(trimmed_context[-1], HumanMessage) and str(trimmed_context[-1].content) == message:
+            if trimmed_context and isinstance(trimmed_context[-1], HumanMessage) and _content_to_text(trimmed_context[-1].content) == message:
                 trimmed_context = trimmed_context[:-1]
 
             tool_messages.extend(trimmed_context)

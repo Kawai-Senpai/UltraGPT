@@ -45,6 +45,8 @@ _openai_warm_lock = threading.Lock()
 _structured_stream_disabled = False
 _structured_stream_lock = threading.Lock()
 
+_IMAGE_CONTENT_TYPES = {"image", "image_url", "input_image"}
+
 def _warm_openai_modules() -> None:
     """Preload OpenAI modules to avoid ModuleLock contention under threading."""
     global _openai_modules_warmed
@@ -68,6 +70,51 @@ def _warm_openai_modules() -> None:
                 logger.debug("Optional OpenAI warmup import failed for %s: %s", module_name, exc)
 
         _openai_modules_warmed = True
+
+
+def _strip_virtual_model_suffix(model: str) -> str:
+    return (model or "").split("::", 1)[0].strip()
+
+
+def _is_image_content_block(block: Any) -> bool:
+    if not isinstance(block, dict):
+        return False
+    if block.get("type") in _IMAGE_CONTENT_TYPES:
+        return True
+    if "image_url" in block:
+        return True
+    mime_type = str(block.get("mime_type") or block.get("media_type") or "")
+    return mime_type.startswith("image/")
+
+
+def _copy_message_with_content(message: BaseMessage, content: Any) -> BaseMessage:
+    if hasattr(message, "model_copy"):
+        return message.model_copy(update={"content": content})
+    if hasattr(message, "copy"):
+        return message.copy(update={"content": content})
+    clone = message.__class__(**getattr(message, "dict", lambda: {})())
+    clone.content = content
+    return clone
+
+
+def _strip_image_blocks_from_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
+    stripped: List[BaseMessage] = []
+    for message in messages:
+        content = getattr(message, "content", None)
+        if not isinstance(content, list):
+            stripped.append(message)
+            continue
+
+        has_image = any(_is_image_content_block(block) for block in content)
+        if not has_image:
+            stripped.append(message)
+            continue
+
+        kept_blocks = [block for block in content if not _is_image_content_block(block)]
+        if kept_blocks:
+            stripped.append(_copy_message_with_content(message, kept_blocks))
+        # image-only messages are dropped to avoid empty content payloads
+    return stripped
 
 def _parse_retry_after(retry_after_value: Optional[str]) -> Optional[float]:
     """Convert a Retry-After header to seconds."""
@@ -1538,6 +1585,10 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "default": {"max_input_tokens": 200_000, "max_output_tokens": 8192},
     }
 
+    _model_input_modalities_cache: Dict[str, List[str]] = {}
+    _model_input_modalities_cache_ts: float = 0.0
+    _model_input_modalities_ttl_seconds: float = 900.0
+
     def __init__(
         self,
         api_key: str,
@@ -1648,6 +1699,90 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
 
         return extra_body or None
 
+    def _get_openrouter_input_modalities(self) -> Dict[str, List[str]]:
+        now = time.time()
+        if (
+            self._model_input_modalities_cache
+            and (now - self._model_input_modalities_cache_ts) < self._model_input_modalities_ttl_seconds
+        ):
+            return self._model_input_modalities_cache
+
+        url = f"{self.base_url.rstrip('/')}/models"
+        headers: Dict[str, str] = {"Authorization": f"Bearer {self.api_key}"}
+        if self.default_headers:
+            headers.update(self.default_headers)
+
+        try:
+            response = httpx.get(
+                url,
+                headers=headers,
+                params={"output_modalities": "all"},
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to fetch OpenRouter model modalities: %s", exc)
+            return self._model_input_modalities_cache
+
+        modalities: Dict[str, List[str]] = {}
+        for item in payload.get("data", []) or []:
+            model_id = item.get("id")
+            if not model_id:
+                continue
+            architecture = item.get("architecture") or {}
+            input_modalities = architecture.get("input_modalities") or item.get("input_modalities") or []
+            if isinstance(input_modalities, list):
+                modalities[model_id] = [str(x).lower() for x in input_modalities]
+
+        self._model_input_modalities_cache = modalities
+        self._model_input_modalities_cache_ts = now
+        return modalities
+
+    def _openrouter_model_supports_images(self, model: str) -> bool:
+        transformed = self._transform_model_name(_strip_virtual_model_suffix(model))
+        input_modalities = self._get_openrouter_input_modalities().get(transformed)
+        if not input_modalities:
+            return False
+        return "image" in input_modalities
+
+    def _strip_images_if_model_is_text_only(
+        self,
+        messages: List[BaseMessage],
+        model: str,
+    ) -> List[BaseMessage]:
+        has_images = any(
+            isinstance(getattr(message, "content", None), list)
+            and any(_is_image_content_block(block) for block in message.content)
+            for message in messages
+        )
+        if not has_images:
+            return messages
+        if self._openrouter_model_supports_images(model):
+            return messages
+        stripped = _strip_image_blocks_from_messages(messages)
+        logger.info(
+            "Stripped image blocks for text-only/unknown OpenRouter model: %s",
+            _strip_virtual_model_suffix(model),
+        )
+        return stripped
+
+    def chat_completion(
+        self,
+        messages: List[BaseMessage],
+        model: str,
+        temperature: float,
+        max_tokens: Optional[int] = None,
+        deepthink: Optional[bool] = None,
+    ) -> Tuple[str, int, Dict[str, Any]]:
+        return super().chat_completion(
+            self._strip_images_if_model_is_text_only(messages, model),
+            model,
+            temperature,
+            max_tokens,
+            deepthink,
+        )
+
     @retry_on_rate_limit
     def chat_completion_with_schema(
         self,
@@ -1667,12 +1802,35 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         For models that DON'T support it (e.g., Claude):
         - Uses shared tool-based workaround via chat_completion_with_schema_via_tools()
         """
+        stripped_messages = self._strip_images_if_model_is_text_only(messages, model)
         if self._supports_native_structured_output(model):
             # Use native structured output (OpenAI, etc.)
-            return super().chat_completion_with_schema(messages, schema, model, temperature, max_tokens, deepthink)
+            return super().chat_completion_with_schema(stripped_messages, schema, model, temperature, max_tokens, deepthink)
         
         # Use tool-based workaround for Claude and other models without native support
-        return self.chat_completion_with_schema_via_tools(messages, schema, model, temperature, max_tokens, deepthink)
+        return self.chat_completion_with_schema_via_tools(stripped_messages, schema, model, temperature, max_tokens, deepthink)
+
+    def chat_completion_with_tools(
+        self,
+        messages: List[BaseMessage],
+        tools: List[Dict[str, Any]],
+        model: str,
+        temperature: float,
+        max_tokens: Optional[int] = None,
+        parallel_tool_calls: Optional[bool] = None,
+        deepthink: Optional[bool] = None,
+        tool_choice: str = "required",
+    ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
+        return super().chat_completion_with_tools(
+            self._strip_images_if_model_is_text_only(messages, model),
+            tools,
+            model,
+            temperature,
+            max_tokens,
+            parallel_tool_calls,
+            deepthink,
+            tool_choice,
+        )
 
 
 @dataclass

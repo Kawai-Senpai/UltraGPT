@@ -11,6 +11,92 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from ..history_utils import remove_orphaned_tool_results_lc, group_tool_call_pairs_lc
 
 
+def _compact_token_value(value: Any, *, max_chars: int = 160) -> str:
+    text = str(value)
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}...({len(text)} chars)"
+
+
+def _media_reference_summary(value: Any) -> str:
+    if isinstance(value, dict):
+        url = value.get("url")
+        if url is not None:
+            return _media_reference_summary(url)
+        return _compact_token_value(value)
+
+    if isinstance(value, str):
+        if value.startswith("data:"):
+            header = value.split(",", 1)[0]
+            return f"{header},...({len(value)} chars)"
+        return _compact_token_value(value)
+
+    return _compact_token_value(value)
+
+
+def _safe_block_for_token_count(block: dict) -> dict:
+    safe: dict = {}
+    for key, value in block.items():
+        if key in {"base64", "data"}:
+            safe[key] = f"<omitted {len(str(value))} chars>"
+        elif key in {"image_url", "url", "file_id"}:
+            safe[key] = _media_reference_summary(value)
+        else:
+            safe[key] = value
+    return safe
+
+
+def _serialize_content_for_token_count(content: Any) -> str:
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts: List[str] = []
+        for block in content:
+            if isinstance(block, str):
+                if block:
+                    parts.append(block)
+                continue
+
+            if isinstance(block, dict):
+                block_type = block.get("type", "content")
+                if block_type in {"text", "input_text", "output_text"}:
+                    text = block.get("text") or block.get("content") or ""
+                    if text:
+                        parts.append(str(text))
+                    continue
+
+                if block_type in {"image", "image_url", "input_image", "audio", "input_audio", "video", "file"}:
+                    safe_block = _safe_block_for_token_count(block)
+                    try:
+                        parts.append(f"[{block_type}: {json.dumps(safe_block, ensure_ascii=False)}]")
+                    except Exception:  # noqa: BLE001
+                        parts.append(f"[{block_type}: {_compact_token_value(safe_block)}]")
+                    continue
+
+                safe_block = _safe_block_for_token_count(block)
+                try:
+                    parts.append(json.dumps(safe_block, ensure_ascii=False))
+                except Exception:  # noqa: BLE001
+                    parts.append(_compact_token_value(safe_block))
+                continue
+
+            parts.append(_compact_token_value(block))
+
+        return "\n".join(part for part in parts if part)
+
+    if isinstance(content, dict):
+        try:
+            return json.dumps(_safe_block_for_token_count(content), ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            return _compact_token_value(content)
+
+    return str(content)
+
+
 def _serialize_message_for_token_count(message: BaseMessage) -> str:
     role = "assistant"
     if isinstance(message, SystemMessage):
@@ -20,13 +106,13 @@ def _serialize_message_for_token_count(message: BaseMessage) -> str:
     elif isinstance(message, ToolMessage):
         role = "tool"
 
-    base_text = f"{role}: {getattr(message, 'content', '')}"
+    base_text = f"{role}: {_serialize_content_for_token_count(getattr(message, 'content', ''))}"
 
     if isinstance(message, AIMessage):
         tool_calls = getattr(message, "tool_calls", []) or []
         if tool_calls:
             try:
-                serialized_calls = json.dumps(tool_calls)
+                serialized_calls = json.dumps(tool_calls, ensure_ascii=False)
             except Exception:  # noqa: BLE001
                 serialized_calls = str(tool_calls)
             base_text += f"\nTOOL_CALLS: {serialized_calls}"

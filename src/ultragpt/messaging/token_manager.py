@@ -3,9 +3,47 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Iterable, List
+from collections.abc import Iterable
+from typing import Any, List
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+
+
+_TEXT_BLOCK_TYPES = {"text", "input_text", "output_text"}
+_MULTIMODAL_BLOCK_TYPES = {
+    "image",
+    "image_url",
+    "input_image",
+    "audio",
+    "input_audio",
+    "video",
+    "file",
+}
+
+
+def _extract_text_from_block(segment: Any) -> str:
+    if isinstance(segment, str):
+        return segment
+
+    if not isinstance(segment, dict):
+        return ""
+
+    seg_type = segment.get("type")
+    if seg_type in _TEXT_BLOCK_TYPES:
+        for key in ("text", "content"):
+            value = segment.get(key)
+            if value not in (None, ""):
+                return str(value)
+        return ""
+
+    if "text" in segment and segment.get("text") not in (None, ""):
+        return str(segment["text"])
+
+    content = segment.get("content")
+    if isinstance(content, str):
+        return content
+
+    return ""
 
 
 def _extract_text(content_val: Any) -> str:
@@ -14,25 +52,84 @@ def _extract_text(content_val: Any) -> str:
     if isinstance(content_val, str):
         return content_val
 
+    if isinstance(content_val, dict):
+        text = _extract_text_from_block(content_val)
+        if text:
+            return text
+        try:
+            return json.dumps(content_val, ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            return str(content_val)
+
     if isinstance(content_val, Iterable) and not isinstance(content_val, (bytes, bytearray)):
-        parts: List[str] = []
-        for segment in content_val:
-            if isinstance(segment, dict):
-                seg_type = segment.get("type")
-                if seg_type in {"text", "output_text"}:
-                    text_value = segment.get("text", "")
-                    if text_value:
-                        parts.append(text_value)
-            elif isinstance(segment, str):
-                parts.append(segment)
+        parts = [_extract_text_from_block(segment) for segment in content_val]
         filtered = [part for part in parts if part]
         if filtered:
             return "\n".join(filtered)
 
     try:
-        return json.dumps(content_val)
+        return json.dumps(content_val, ensure_ascii=False)
     except Exception:  # noqa: BLE001
         return str(content_val)
+
+
+def _normalize_text_block(segment: Any) -> dict | None:
+    text_value = _extract_text_from_block(segment)
+    if text_value:
+        return {"type": "text", "text": text_value}
+    return None
+
+
+def _normalize_multimodal_block(segment: dict) -> dict | None:
+    seg_type = segment.get("type")
+
+    if seg_type in _MULTIMODAL_BLOCK_TYPES:
+        return dict(segment)
+
+    if "image_url" in segment:
+        normalized = dict(segment)
+        normalized.setdefault("type", "image_url")
+        return normalized
+
+    if any(key in segment for key in ("url", "base64", "file_id")):
+        normalized = dict(segment)
+        normalized.setdefault("type", "image")
+        return normalized
+
+    return None
+
+
+def _normalize_user_content(content_val: Any) -> Any:
+    """Preserve supported multimodal user blocks while normalizing text-only payloads."""
+    if not isinstance(content_val, list):
+        return _extract_text(content_val)
+
+    normalized: List[Any] = []
+    has_multimodal = False
+    for segment in content_val:
+        if isinstance(segment, dict):
+            seg_type = segment.get("type")
+            if seg_type in _TEXT_BLOCK_TYPES:
+                text_block = _normalize_text_block(segment)
+                if text_block:
+                    normalized.append(text_block)
+                continue
+
+            media_block = _normalize_multimodal_block(segment)
+            if media_block is not None:
+                normalized.append(media_block)
+                has_multimodal = True
+                continue
+
+            text_block = _normalize_text_block(segment)
+            if text_block:
+                normalized.append(text_block)
+        elif isinstance(segment, str) and segment:
+            normalized.append({"type": "text", "text": segment})
+
+    if has_multimodal:
+        return normalized
+    return _extract_text(content_val)
 
 
 def _build_ai_message(content: Any, message: dict) -> AIMessage:
@@ -127,7 +224,7 @@ def ensure_langchain_messages(messages: List[Any]) -> List[BaseMessage]:
             continue
 
         if role == "user":
-            normalized.append(HumanMessage(content=_extract_text(content)))
+            normalized.append(HumanMessage(content=_normalize_user_content(content)))
             continue
 
         if role == "assistant":
@@ -138,7 +235,7 @@ def ensure_langchain_messages(messages: List[Any]) -> List[BaseMessage]:
             normalized.append(_build_tool_message(content, message))
             continue
 
-        normalized.append(HumanMessage(content=_extract_text(content)))
+        normalized.append(HumanMessage(content=_normalize_user_content(content)))
 
     return normalized
 

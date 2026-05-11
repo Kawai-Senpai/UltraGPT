@@ -147,7 +147,36 @@ def drop_empty_messages_lc(
     logger: Any = None,
     verbose: bool = False,
 ) -> List[BaseMessage]:
-    """Filter out messages that contain no textual content and no tool usage."""
+    """Filter out messages that contain no content payload and no tool usage."""
+
+    def _content_has_payload(content: Any) -> bool:
+        if isinstance(content, str):
+            return bool(content.strip())
+
+        if isinstance(content, list):
+            for segment in content:
+                if isinstance(segment, str):
+                    if segment.strip():
+                        return True
+                    continue
+
+                if isinstance(segment, dict):
+                    seg_type = segment.get("type")
+                    if seg_type in {"text", "input_text", "output_text"}:
+                        text_value = segment.get("text") or segment.get("content") or ""
+                        if str(text_value).strip():
+                            return True
+                        continue
+
+                    if segment:
+                        return True
+                    continue
+
+                if segment is not None:
+                    return True
+            return False
+
+        return content is not None
 
     if not messages:
         return []
@@ -158,22 +187,12 @@ def drop_empty_messages_lc(
     for message in messages:
         content = getattr(message, "content", None)
 
-        keep = False
+        has_payload = _content_has_payload(content)
         if isinstance(message, AIMessage):
-            has_text = isinstance(content, str) and bool(content.strip())
-            has_payload = content is not None and not isinstance(content, str)
             has_tools = bool(getattr(message, "tool_calls", []) or [])
-            keep = has_text or has_payload or has_tools
-        elif isinstance(message, ToolMessage):
-            if isinstance(content, str):
-                keep = bool(content.strip())
-            else:
-                keep = content is not None
+            keep = has_payload or has_tools
         else:
-            if isinstance(content, str):
-                keep = bool(content.strip())
-            else:
-                keep = content is not None
+            keep = has_payload
 
         if keep:
             cleaned.append(message)
