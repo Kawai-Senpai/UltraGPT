@@ -21,7 +21,7 @@ from ..prompts import (
     generate_multiple_tool_call_prompt,
     generate_single_tool_call_prompt,
 )
-from ..providers import OpenRouterProvider, ProviderManager
+from ..providers import OpenRouterOptions, OpenRouterProvider, ProviderManager
 from ..tooling import ToolManager
 from ..tools.web_search.core import google_search, scrape_url
 from .chat_flow import ChatFlow
@@ -73,6 +73,10 @@ class UltraGPT:
         input_truncation: Union[str, int] = None,
         reserve_ratio: Optional[float] = None,
         fallback_models: Optional[List[str]] = None,
+        openrouter_session_id: Optional[str] = None,
+        openrouter_provider: Optional[Dict[str, Any]] = None,
+        openrouter_prompt_cache: bool = True,
+        openrouter_prompt_cache_ttl: Optional[str] = None,
         verbose: bool = False,
         logger_name: str = "ultragpt",
         logger_filename: str = "debug/ultragpt.log",
@@ -111,6 +115,14 @@ class UltraGPT:
         self.input_truncation = input_truncation if input_truncation is not None else config.DEFAULT_INPUT_TRUNCATION
         self.reserve_ratio = reserve_ratio if reserve_ratio is not None else config.DEFAULT_RESERVE_RATIO
         self.default_fallback_models = list(fallback_models) if fallback_models else None
+        self.openrouter_options = OpenRouterOptions(
+            session_id=openrouter_session_id,
+            provider=openrouter_provider,
+            prompt_cache=openrouter_prompt_cache,
+            prompt_cache_mode="auto",
+            prompt_cache_ttl=openrouter_prompt_cache_ttl,
+            response_cache=False,
+        )
 
         self.log = logger(
             name=logger_name,
@@ -166,12 +178,28 @@ class UltraGPT:
     def _ensure_lc_messages(messages: List[Any]) -> List[BaseMessage]:
         return ensure_langchain_messages(messages)
 
+    def _merge_openrouter_options(self, override=None) -> Dict[str, Any]:
+        from dataclasses import asdict
+        base = {key: value for key, value in asdict(self.openrouter_options).items() if value is not None}
+        if isinstance(override, OpenRouterOptions):
+            override = asdict(override)
+        if override:
+            base.update({key: value for key, value in dict(override).items() if value is not None})
+        return base
+
     @staticmethod
     def _int_or_zero(value: Any) -> int:
         try:
             return int(value)
         except (TypeError, ValueError):
             return 0
+
+    @staticmethod
+    def _float_or_zero(value: Any) -> float:
+        try:
+            return float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
 
 
     @classmethod
@@ -196,6 +224,15 @@ class UltraGPT:
         final_input = cls._int_or_zero(final_details.get("input_tokens"))
         final_output = cls._int_or_zero(final_details.get("output_tokens"))
         final_reasoning_api = cls._int_or_zero(final_details.get("reasoning_tokens"))
+        final_cached_input = cls._int_or_zero(
+            final_details.get("cached_input_tokens")
+        )
+        final_cache_creation = cls._int_or_zero(
+            final_details.get("cache_creation_input_tokens")
+        )
+        final_cost = cls._float_or_zero(final_details.get("cost"))
+        reasoning_cost = cls._float_or_zero(reasoning_usage.get("cost"))
+        steps_cost = cls._float_or_zero(steps_usage.get("cost"))
 
         reasoning_total = cls._int_or_zero(reasoning_usage.get("total_tokens"))
         if reasoning_total <= 0:
@@ -217,24 +254,49 @@ class UltraGPT:
                 "reasoning_tokens_api": final_reasoning_api
                 + cls._int_or_zero(reasoning_usage.get("reasoning_tokens_api"))
                 + cls._int_or_zero(steps_usage.get("reasoning_tokens_api")),
+                "cached_input_tokens": final_cached_input
+                + cls._int_or_zero(reasoning_usage.get("cached_input_tokens"))
+                + cls._int_or_zero(steps_usage.get("cached_input_tokens")),
+                "cache_creation_input_tokens": final_cache_creation
+                + cls._int_or_zero(
+                    reasoning_usage.get("cache_creation_input_tokens")
+                )
+                + cls._int_or_zero(steps_usage.get("cache_creation_input_tokens")),
+                "cost": final_cost + reasoning_cost + steps_cost,
+                "cost_currency": final_details.get("cost_currency") or "openrouter_credits",
+                "cost_source": (
+                    "provider_reported"
+                    if all(
+                        usage.get("cost_source") in {None, "provider_reported"}
+                        for usage in (final_details, reasoning_usage, steps_usage)
+                    )
+                    else "mixed"
+                ),
             },
             "final": {
                 "input_tokens": final_input,
                 "output_tokens": final_output,
                 "total_tokens": final_total,
                 "reasoning_tokens_api": final_reasoning_api,
+                "cached_input_tokens": final_cached_input,
+                "cache_creation_input_tokens": final_cache_creation,
+                "cost": final_cost,
+                "cost_source": final_details.get("cost_source"),
+                "cost_currency": final_details.get("cost_currency"),
             },
             "reasoning_pipeline": {
                 "input_tokens": cls._int_or_zero(reasoning_usage.get("input_tokens")),
                 "output_tokens": cls._int_or_zero(reasoning_usage.get("output_tokens")),
                 "total_tokens": reasoning_total,
                 "reasoning_tokens_api": cls._int_or_zero(reasoning_usage.get("reasoning_tokens_api")),
+                "cost": reasoning_cost,
             },
             "steps_pipeline": {
                 "input_tokens": cls._int_or_zero(steps_usage.get("input_tokens")),
                 "output_tokens": cls._int_or_zero(steps_usage.get("output_tokens")),
                 "total_tokens": steps_total,
                 "reasoning_tokens_api": cls._int_or_zero(steps_usage.get("reasoning_tokens_api")),
+                "cost": steps_cost,
             },
         }
 
@@ -634,6 +696,16 @@ class UltraGPT:
             "output_tokens": final_details.get("output_tokens", 0),
             "total_tokens": final_details.get("total_tokens", 0),
             "reasoning_tokens_api": final_details.get("reasoning_tokens", 0),  # From API response
+            "cached_input_tokens": final_details.get("cached_input_tokens", 0),
+            "cache_creation_input_tokens": final_details.get(
+                "cache_creation_input_tokens", 0
+            ),
+            "actual_cost": final_details.get("actual_cost"),
+            "estimated_cost": final_details.get("estimated_cost"),
+            "cost": final_details.get("cost"),
+            "cost_source": final_details.get("cost_source"),
+            "cost_currency": final_details.get("cost_currency"),
+            "cost_details": final_details.get("cost_details"),
             "reasoning_text": final_details.get("reasoning_text"),
         }
 
@@ -710,6 +782,7 @@ class UltraGPT:
         tools_config: dict = None,
         max_tokens: Optional[int] = None,
         fallback_models: Optional[List[str]] = None,
+        openrouter_options: Optional[Union[OpenRouterOptions, Dict[str, Any]]] = None,
     ) -> Tuple[Any, int, Dict[str, Any]]:
     
         model = model or config.DEFAULT_MODEL
@@ -724,6 +797,7 @@ class UltraGPT:
             if fallback_models is None
             else (list(fallback_models) if fallback_models else None)
         )
+        effective_openrouter_options = self._merge_openrouter_options(openrouter_options)
 
         validated_tools = self.tool_manager.validate_user_tools(user_tools)
         tool_prompt = (
@@ -835,6 +909,7 @@ class UltraGPT:
             deepthink=final_deepthink,
             reserve_ratio=reserve_ratio,
             fallback_models=effective_fallback_models,
+            openrouter_options=effective_openrouter_options,
         )
 
         total_tokens = reasoning_tokens + steps_tokens + tokens
@@ -853,6 +928,18 @@ class UltraGPT:
             "output_tokens": final_details.get("output_tokens", 0),
             "total_tokens": final_details.get("total_tokens", 0),
             "reasoning_tokens_api": final_details.get("reasoning_tokens", 0),  # From API response
+            "cached_input_tokens": final_details.get("cached_input_tokens", 0),
+            "cache_creation_input_tokens": final_details.get(
+                "cache_creation_input_tokens", 0
+            ),
+            "cache_write_tokens": final_details.get("cache_write_tokens", 0),
+            "cache_discount": final_details.get("cache_discount", 0.0),
+            "actual_cost": final_details.get("actual_cost"),
+            "estimated_cost": final_details.get("estimated_cost"),
+            "cost": final_details.get("cost"),
+            "cost_source": final_details.get("cost_source"),
+            "cost_currency": final_details.get("cost_currency"),
+            "cost_details": final_details.get("cost_details"),
             "reasoning_text": final_details.get("reasoning_text"),
             # Include reasoning_details for tool call continuity (OpenRouter normalized format)
             "reasoning_details": final_details.get("reasoning_details") or response_message.get("reasoning_details"),

@@ -36,10 +36,17 @@ from .providers import (
     BaseProvider,
     BaseOpenAICompatibleProvider,
     OpenRouterProvider,
+    OpenRouterOptions,
     ProviderManager,
     is_rate_limit_error,
 )
 from .tooling import ToolManager
+from .core.pricing import (
+    CachePricing,
+    ModelPricing,
+    estimate_cost,
+    load_openrouter_pricing,
+)
 
 # Backwards compatible aliases for legacy helper names
 remove_orphaned_tool_results = remove_orphaned_tool_results_lc
@@ -55,6 +62,7 @@ __all__ = [
     "BaseProvider",
     "BaseOpenAICompatibleProvider",
     "OpenRouterProvider",
+    "OpenRouterOptions",
     "ProviderManager",
     "is_rate_limit_error",
     "LangChainTokenLimiter",
@@ -79,6 +87,10 @@ __all__ = [
     "Steps",
     "UserTool",
     "ExpertTool",
+    "CachePricing",
+    "ModelPricing",
+    "estimate_cost",
+    "load_openrouter_pricing",
     # Schema utilities
     "normalize_pydantic_optional_fields",
     "ensure_openai_strict_compliance",

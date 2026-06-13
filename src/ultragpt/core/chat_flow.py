@@ -59,6 +59,7 @@ class ChatFlow:
         deepthink: Optional[bool] = None,
         reserve_ratio: Optional[float] = None,
         fallback_models: Optional[List[str]] = None,
+        openrouter_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, int, Dict[str, Any]]:
         """Synchronously call the provider and return text output."""
 
@@ -91,6 +92,7 @@ class ChatFlow:
             deepthink=deepthink,
             reserve_ratio=reserve_ratio,
             fallback_models=fallback_models,
+            provider_options=openrouter_options,
         )
 
         details_dict = {
@@ -114,6 +116,7 @@ class ChatFlow:
         deepthink: Optional[bool],
         reserve_ratio: Optional[float] = None,
         fallback_models: Optional[List[str]] = None,
+        openrouter_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Any, int, Dict[str, Any]]:
         model = model or "gpt-4o"
         lc_messages = self._ensure_lc_messages(messages)
@@ -134,6 +137,7 @@ class ChatFlow:
             deepthink=deepthink,
             reserve_ratio=reserve_ratio,
             fallback_models=fallback_models,
+            provider_options=openrouter_options,
         )
 
         details_dict = {
@@ -158,6 +162,7 @@ class ChatFlow:
         deepthink: Optional[bool],
         reserve_ratio: Optional[float] = None,
         fallback_models: Optional[List[str]] = None,
+        openrouter_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         lc_messages = self._ensure_lc_messages(messages)
 
@@ -180,6 +185,7 @@ class ChatFlow:
             deepthink=deepthink,
             reserve_ratio=reserve_ratio,
             fallback_models=fallback_models,
+            provider_options=openrouter_options,
         )
 
         details_dict = {

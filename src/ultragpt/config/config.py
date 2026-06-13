@@ -2,11 +2,11 @@
 # This file contains all configurable parameters for UltraGPT
 
 # Default Models
-DEFAULT_MODEL = "gpt-5"
+DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_STEPS_MODEL = "gpt-5.4-nano"
 DEFAULT_REASONING_MODEL = "gpt-5.4-nano"
-DEFAULT_PARSE_MODEL = "gpt-5"
-DEFAULT_TOOLS_MODEL = "gpt-5"
+DEFAULT_PARSE_MODEL = "gpt-5.5"
+DEFAULT_TOOLS_MODEL = "gpt-5.5"
 
 # History Configuration
 MAX_CONTEXT_MESSAGES = 10

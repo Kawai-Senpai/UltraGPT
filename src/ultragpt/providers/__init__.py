@@ -8,6 +8,7 @@ from .providers import (
     BaseProvider,
     BaseOpenAICompatibleProvider,
     OpenRouterProvider,
+    OpenRouterOptions,
     ProviderManager,
     is_rate_limit_error,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "BaseProvider",
     "BaseOpenAICompatibleProvider",
     "OpenRouterProvider",
+    "OpenRouterOptions",
     "ProviderManager",
     "is_rate_limit_error",
 ]

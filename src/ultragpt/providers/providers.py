@@ -19,7 +19,7 @@ import logging
 import random
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -30,6 +30,12 @@ from langchain_openai import ChatOpenAI
 
 from .. import config
 from ..schemas import prepare_schema_for_openai, sanitize_tool_parameters_schema
+from ..core.pricing import (
+    STATIC_MODEL_PRICING,
+    ModelPricing,
+    estimate_cost,
+    load_openrouter_pricing,
+)
 from ..messaging import (
     LangChainTokenLimiter,
     consolidate_system_messages_safe,
@@ -232,7 +238,46 @@ EXPLICIT_CACHE_MODELS = [
 ]
 
 # Default cache TTL for explicit caching (1 hour for long agent sessions)
-DEFAULT_CACHE_TTL = "1h"
+DEFAULT_CACHE_TTL = None
+
+
+@dataclass(frozen=True)
+class OpenRouterOptions:
+    """Per-request OpenRouter routing and cache controls."""
+
+    session_id: Optional[str] = None
+    provider: Optional[Dict[str, Any]] = None
+    prompt_cache: Optional[bool] = None
+    prompt_cache_mode: str = "auto"
+    prompt_cache_ttl: Optional[str] = None
+    response_cache: Optional[bool] = None
+    response_cache_ttl: Optional[int] = None
+    response_cache_clear: bool = False
+
+
+def _normalize_openrouter_options(
+    options: Optional[Union[OpenRouterOptions, Dict[str, Any]]],
+) -> Dict[str, Any]:
+    if options is None:
+        return {}
+    if isinstance(options, OpenRouterOptions):
+        return {key: value for key, value in asdict(options).items() if value is not None}
+    if isinstance(options, dict):
+        return {key: value for key, value in options.items() if value is not None}
+    raise TypeError("openrouter_options must be OpenRouterOptions, dict, or None")
+
+
+def _cache_control_object(ttl: Optional[str] = None) -> Dict[str, Any]:
+    cache_control: Dict[str, Any] = {"type": "ephemeral"}
+    if ttl is None:
+        return cache_control
+    normalized = str(ttl).strip().lower()
+    if normalized in {"", "5m", "5min", "5mins", "5-minute", "default"}:
+        return cache_control
+    if normalized in {"1h", "1hr", "1hour", "1-hour", "60m", "60min"}:
+        cache_control["ttl"] = "1h"
+        return cache_control
+    raise ValueError("Unsupported prompt_cache_ttl. Use None, '5m', or '1h'.")
 
 
 def _needs_explicit_caching(model: str) -> bool:
@@ -249,7 +294,7 @@ def _apply_prompt_caching(
     messages: List[BaseMessage],
     model: str,
     *,
-    cache_ttl: str = DEFAULT_CACHE_TTL,
+    cache_ttl: Optional[str] = DEFAULT_CACHE_TTL,
     enable_caching: bool = True,
 ) -> List[BaseMessage]:
     """Apply prompt caching optimizations to message list.
@@ -297,7 +342,7 @@ def _apply_prompt_caching(
             {
                 "type": "text",
                 "text": content,
-                "cache_control": {"type": "ephemeral", "ttl": cache_ttl}
+                "cache_control": _cache_control_object(cache_ttl)
             }
         ]
     elif isinstance(content, list):
@@ -311,7 +356,7 @@ def _apply_prompt_caching(
         
         if last_text_idx is not None and isinstance(new_content[last_text_idx], dict):
             # Add cache_control to the last text block
-            new_content[last_text_idx]["cache_control"] = {"type": "ephemeral", "ttl": cache_ttl}
+            new_content[last_text_idx]["cache_control"] = _cache_control_object(cache_ttl)
     else:
         # Unknown format, return unchanged
         return messages
@@ -340,6 +385,7 @@ class BaseProvider:
         temperature: float,
         max_tokens: Optional[int] = None,
         deepthink: Optional[bool] = None,
+        provider_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, int, Dict[str, Any]]:
         raise NotImplementedError
 
@@ -452,6 +498,7 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         max_tokens: Optional[int],
         *,
         extra_kwargs: Optional[Dict[str, Any]] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
     ) -> ChatOpenAI:
         """Build ChatOpenAI instance with provider-specific settings."""
         transformed_model = self._transform_model_name(model)
@@ -466,8 +513,11 @@ class BaseOpenAICompatibleProvider(BaseProvider):
             kwargs["base_url"] = self.base_url
 
         # Add default headers
-        if self.default_headers:
-            kwargs["default_headers"] = self.default_headers
+        merged_headers = dict(self.default_headers or {})
+        if extra_headers:
+            merged_headers.update(extra_headers)
+        if merged_headers:
+            kwargs["default_headers"] = merged_headers
 
         # Temperature (skip for reasoning models)
         if self._should_include_temperature(model):
@@ -526,6 +576,7 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         model: str,
         max_tokens: Optional[int],
         deepthink: Optional[bool],
+        provider_options: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Construct provider-specific extra_body payload.
 
@@ -923,6 +974,16 @@ class BaseOpenAICompatibleProvider(BaseProvider):
                 "output_tokens": 0,
                 "total_tokens": 0,
                 "reasoning_tokens": 0,
+                "cached_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_write_tokens": 0,
+                "cache_discount": 0.0,
+                "actual_cost": None,
+                "estimated_cost": None,
+                "cost": None,
+                "cost_source": None,
+                "cost_currency": None,
+                "cost_details": None,
                 "reasoning_text": None,
             }
 
@@ -931,6 +992,16 @@ class BaseOpenAICompatibleProvider(BaseProvider):
             "output_tokens": 0,
             "total_tokens": 0,
             "reasoning_tokens": 0,
+            "cached_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_discount": 0.0,
+            "actual_cost": None,
+            "estimated_cost": None,
+            "cost": None,
+            "cost_source": None,
+            "cost_currency": None,
+            "cost_details": None,
             "reasoning_text": None,
         }
 
@@ -942,6 +1013,22 @@ class BaseOpenAICompatibleProvider(BaseProvider):
             details["total_tokens"] = details["input_tokens"] + details["output_tokens"]
 
             output_details = usage_meta.get("output_token_details", {}) or {}
+            input_details = usage_meta.get("input_token_details", {}) or {}
+            if isinstance(input_details, dict):
+                cached = input_details.get("cache_read")
+                if cached is None:
+                    cached = input_details.get("cached_tokens")
+                created = input_details.get("cache_creation")
+                if created is None:
+                    created = input_details.get("cache_creation_input_tokens")
+                try:
+                    details["cached_input_tokens"] = int(cached or 0)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    details["cache_creation_input_tokens"] = int(created or 0)
+                except (TypeError, ValueError):
+                    pass
             reasoning_from_usage = (
                 output_details.get("reasoning")
                 if isinstance(output_details, dict) else None
@@ -969,11 +1056,41 @@ class BaseOpenAICompatibleProvider(BaseProvider):
                 # Check for reasoning tokens in completion_tokens_details
                 completion_details = token_usage.get("completion_tokens_details", {}) or {}
                 details["reasoning_tokens"] = int(completion_details.get("reasoning_tokens", 0))
+                prompt_details = token_usage.get("prompt_tokens_details", {}) or {}
+                details["cached_input_tokens"] = int(
+                    prompt_details.get("cached_tokens", 0) or 0
+                )
+                details["cache_write_tokens"] = int(
+                    prompt_details.get("cache_write_tokens", 0) or 0
+                )
+                if details["cache_write_tokens"]:
+                    details["cache_creation_input_tokens"] = details["cache_write_tokens"]
+                if token_usage.get("cache_creation_input_tokens") is not None:
+                    details["cache_creation_input_tokens"] = int(
+                        token_usage.get("cache_creation_input_tokens") or 0
+                    )
+                BaseOpenAICompatibleProvider._extract_cost_fields(details, token_usage)
             elif usage:
                 # Standard OpenAI format
                 details["input_tokens"] = int(usage.get("prompt_tokens", 0))
                 details["output_tokens"] = int(usage.get("completion_tokens", 0))
                 details["total_tokens"] = int(usage.get("total_tokens", 0))
+                prompt_details = usage.get("prompt_tokens_details", {}) or {}
+                details["cached_input_tokens"] = int(
+                    prompt_details.get("cached_tokens", 0) or 0
+                )
+                details["cache_creation_input_tokens"] = int(
+                    usage.get("cache_creation_input_tokens", 0) or 0
+                )
+                prompt_details = usage.get("prompt_tokens_details", {}) or {}
+                if prompt_details.get("cached_tokens") is not None:
+                    details["cached_input_tokens"] = int(prompt_details.get("cached_tokens") or 0)
+                if prompt_details.get("cache_write_tokens") is not None:
+                    details["cache_write_tokens"] = int(prompt_details.get("cache_write_tokens") or 0)
+                    details["cache_creation_input_tokens"] = details["cache_write_tokens"]
+                if usage.get("cache_discount") is not None:
+                    details["cache_discount"] = float(usage.get("cache_discount") or 0.0)
+                BaseOpenAICompatibleProvider._extract_cost_fields(details, usage)
 
         # Try to extract reasoning text and reasoning_details if available
         # reasoning_details is the normalized OpenRouter format for reasoning models
@@ -987,6 +1104,51 @@ class BaseOpenAICompatibleProvider(BaseProvider):
                 details["reasoning_details"] = additional.get("reasoning_details")
 
         return details
+
+    @staticmethod
+    def _extract_cost_fields(details: Dict[str, Any], usage: Dict[str, Any]) -> None:
+        try:
+            actual_cost = float(usage["cost"]) if usage.get("cost") is not None else None
+        except (TypeError, ValueError):
+            actual_cost = None
+        if actual_cost is not None:
+            details["actual_cost"] = actual_cost
+            details["cost"] = actual_cost
+            details["cost_source"] = "provider_reported"
+            details["cost_currency"] = "openrouter_credits"
+        if isinstance(usage.get("cost_details"), dict):
+            details["cost_details"] = dict(usage["cost_details"])
+        try:
+            if usage.get("cache_discount") is not None:
+                details["cache_discount"] = float(usage.get("cache_discount") or 0.0)
+        except (TypeError, ValueError):
+            pass
+
+    def _finalize_usage_cost(
+        self,
+        usage_details: Dict[str, Any],
+        model: str,
+        provider_options: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if usage_details.get("actual_cost") is not None:
+            return usage_details
+        transformed = self._transform_model_name(model)
+        pricing_map = getattr(self, "_pricing_map", STATIC_MODEL_PRICING)
+        estimated = estimate_cost(
+            model=transformed,
+            input_tokens=usage_details.get("input_tokens", 0),
+            output_tokens=usage_details.get("output_tokens", 0),
+            cached_input_tokens=usage_details.get("cached_input_tokens", 0),
+            cache_write_tokens=usage_details.get("cache_write_tokens", 0),
+            prompt_cache_ttl=(provider_options or {}).get("prompt_cache_ttl"),
+            pricing_map=pricing_map,
+        )
+        usage_details["estimated_cost"] = estimated
+        if estimated is not None:
+            usage_details["cost"] = estimated
+            usage_details["cost_source"] = "estimated"
+            usage_details["cost_currency"] = "USD"
+        return usage_details
 
     def _finalize_structured_result(self, final_obj: Any) -> Tuple[Dict[str, Any], int]:
         """Normalize structured stream output into parsed dict and usage."""
@@ -1030,16 +1192,18 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         temperature: float,
         max_tokens: Optional[int] = None,
         deepthink: Optional[bool] = None,
+        provider_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, int, Dict[str, Any]]:
-        extra_body = self._build_extra_body(model, max_tokens, deepthink)
+        extra_body = self._build_extra_body(model, max_tokens, deepthink, provider_options)
         extra_kwargs = {"extra_body": extra_body} if extra_body else {}
-        
-        llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens, extra_kwargs=extra_kwargs)
+        extra_headers = self._build_openrouter_headers(provider_options) if hasattr(self, "_build_openrouter_headers") else {}
+        llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens, extra_kwargs=extra_kwargs, extra_headers=extra_headers)
         stream = llm.stream(messages)
         final_chunk = self._accumulate_stream(stream)
         content = getattr(final_chunk, "content", "") or ""
         tokens_used = self._usage_total_tokens_from_message(final_chunk)
         usage_details = self._extract_usage_details(final_chunk)
+        usage_details = self._finalize_usage_cost(usage_details, model, provider_options)
         return str(content).strip(), tokens_used, usage_details
 
     @retry_on_rate_limit
@@ -1051,9 +1215,11 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         temperature: float,
         max_tokens: Optional[int] = None,
         deepthink: Optional[bool] = None,
+        provider_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
-        extra_body = self._build_extra_body(model, max_tokens, deepthink)
+        extra_body = self._build_extra_body(model, max_tokens, deepthink, provider_options)
         extra_kwargs = {"extra_body": extra_body} if extra_body else {}
+        extra_headers = self._build_openrouter_headers(provider_options) if hasattr(self, "_build_openrouter_headers") else {}
 
         transformed = self._transform_model_name(model)
         if hasattr(self, "NO_NATIVE_STRUCTURED_OUTPUT"):
@@ -1066,9 +1232,10 @@ class BaseOpenAICompatibleProvider(BaseProvider):
                         temperature,
                         max_tokens=max_tokens,
                         deepthink=deepthink,
+                        provider_options=provider_options,
                     )
         
-        llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens, extra_kwargs=extra_kwargs)
+        llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens, extra_kwargs=extra_kwargs, extra_headers=extra_headers)
         schema_dict = prepare_schema_for_openai(schema.model_json_schema())
         
         structured_llm = llm.with_structured_output(
@@ -1109,6 +1276,7 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         usage_details = {}
         if isinstance(final_obj, dict) and "raw" in final_obj:
             usage_details = self._extract_usage_details(final_obj.get("raw"))
+        usage_details = self._finalize_usage_cost(usage_details, model, provider_options)
         
         return parsed_dict, tokens_used, usage_details
 
@@ -1120,6 +1288,7 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         temperature: float,
         max_tokens: Optional[int] = None,
         deepthink: Optional[bool] = None,
+        provider_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         """
         Tool-based structured output workaround for providers that don't support native structured output.
@@ -1174,6 +1343,7 @@ class BaseOpenAICompatibleProvider(BaseProvider):
             parallel_tool_calls=False,
             deepthink=deepthink,
             tool_choice="required"
+            ,provider_options=provider_options
         )
         
         # Extract tool call result
@@ -1242,11 +1412,12 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         parallel_tool_calls: Optional[bool] = None,
         deepthink: Optional[bool] = None,
         tool_choice: str = "required",
+        provider_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
-        extra_body = self._build_extra_body(model, max_tokens, deepthink)
+        extra_body = self._build_extra_body(model, max_tokens, deepthink, provider_options)
         extra_kwargs = {"extra_body": extra_body} if extra_body else {}
-        
-        llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens, extra_kwargs=extra_kwargs)
+        extra_headers = self._build_openrouter_headers(provider_options) if hasattr(self, "_build_openrouter_headers") else {}
+        llm = self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens, extra_kwargs=extra_kwargs, extra_headers=extra_headers)
         
         # Normalize and sanitize tools
         normalized_tools = []
@@ -1330,6 +1501,7 @@ class BaseOpenAICompatibleProvider(BaseProvider):
             response_message["reasoning_details"] = additional_kwargs["reasoning_details"]
 
         usage_details = self._extract_usage_details(final_chunk)
+        usage_details = self._finalize_usage_cost(usage_details, model, provider_options)
         return response_message, tokens_used, usage_details
 
 
@@ -1338,7 +1510,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
     
     Routes to any model through OpenRouter's unified endpoint:
     - GPT models (gpt-4o, gpt-4, gpt-3.5-turbo, etc.)
-    - Claude models (claude-sonnet-4.5, claude-opus-4, etc.) with 1M context
+    - Claude models (claude-sonnet-4.6, claude-opus-4.8, etc.) with up to 1M context
     - Llama models (llama-3.3, llama-3.1, etc.)
     - Mistral, Gemini, and more
     
@@ -1359,6 +1531,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "anthropic/claude-opus",  # Claude Opus family supports reasoning tokens
         "deepseek/deepseek-chat",  # DeepSeek v3.1 reasoning traces via effort flag
         "deepseek/deepseek-v3.2",  # DeepSeek v3.2 reasoning traces via reasoning.enabled
+        "deepseek/deepseek-v4",  # DeepSeek V4 Pro/Flash reasoning family
         "x-ai/grok-4",  # Grok 4 always returns reasoning traces
         "google/gemini-3.1-pro-preview",  # Gemini 3.1 Pro Preview (enhanced SWE + agentic perf)
         "google/gemini-3-pro-preview",  # Gemini 3 Pro Preview exposes reasoning tokens via OpenRouter
@@ -1372,6 +1545,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
     NO_NATIVE_STRUCTURED_OUTPUT = [
         "anthropic/claude",  # All Claude models via OpenRouter don't support native structured output
         "openai/gpt-5.4-pro",  # GPT-5.4 Pro is Responses-only; avoid native structured output
+        "openai/gpt-5.5-pro",
     ]
 
     # Models that expect max_output_tokens instead of max_tokens in the payload
@@ -1386,11 +1560,19 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
 
     # Model slug mappings for friendly names → OpenRouter format
     _MODEL_SLUGS = {
-        # Claude models (extended 1M context for Sonnet 4/4.5)
+        # Anthropic Claude Sonnet
+        "claude-sonnet-4.6": "anthropic/claude-sonnet-4.6",
+        "claude-sonnet-4-6": "anthropic/claude-sonnet-4.6",
+        "sonnet-4.6": "anthropic/claude-sonnet-4.6",
+        "sonnet-4-6": "anthropic/claude-sonnet-4.6",
         "claude-sonnet-4.5": "anthropic/claude-sonnet-4.5",
         "claude-sonnet-4-5": "anthropic/claude-sonnet-4.5",
         "claude-sonnet-4": "anthropic/claude-sonnet-4",
-        # Opus models (200k context)
+
+        # Anthropic Claude Opus
+        "claude-opus-4.8": "anthropic/claude-opus-4.8",
+        "claude-opus-4-8": "anthropic/claude-opus-4.8",
+        "opus-4.8": "anthropic/claude-opus-4.8",
         "claude-opus-4.5": "anthropic/claude-opus-4.5",
         "claude-opus-4-5": "anthropic/claude-opus-4.5",
         "claude-opus-4.1": "anthropic/claude-opus-4.1",
@@ -1401,19 +1583,16 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "claude-3.5-haiku": "anthropic/claude-3.5-haiku",
         "claude-3-5-haiku": "anthropic/claude-3.5-haiku",
         "claude-3-haiku": "anthropic/claude-3-haiku",
-        # GPT models (explicit GPT-5.1 mappings)
-        "gpt-5.1": "openai/gpt-5.1",
-        "gpt-5.1-chat": "openai/gpt-5.1-chat",
-        "gpt5.1": "openai/gpt-5.1",
-        "gpt5.1-chat": "openai/gpt-5.1-chat",
-        # GPT models (explicit GPT-5.2 mappings)
-        "gpt-5.2": "openai/gpt-5.2",
-        "gpt-5.2-pro": "openai/gpt-5.2-pro",
-        "gpt-5.2-chat": "openai/gpt-5.2-chat",
-        "gpt5.2": "openai/gpt-5.2",
-        "gpt5.2-pro": "openai/gpt-5.2-pro",
-        "gpt5.2-chat": "openai/gpt-5.2-chat",
-        # GPT models (explicit GPT-5.4 mappings)
+        # OpenAI GPT-5.5
+        "gpt-5.5-pro": "openai/gpt-5.5-pro",
+        "gpt5.5-pro": "openai/gpt-5.5-pro",
+        "gpt-5-5-pro": "openai/gpt-5.5-pro",
+        "gpt-5.5": "openai/gpt-5.5",
+        "gpt5.5": "openai/gpt-5.5",
+        "gpt-5-5": "openai/gpt-5.5",
+        "gpt-5.5-2026-04-23": "openai/gpt-5.5",
+
+        # OpenAI GPT-5.4
         "gpt-5.4": "openai/gpt-5.4",
         "gpt-5.4-pro": "openai/gpt-5.4-pro",
         "gpt-5.4-mini": "openai/gpt-5.4-mini",
@@ -1424,11 +1603,23 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "gpt5.4-nano": "openai/gpt-5.4-nano",
         "gpt-5-4-mini": "openai/gpt-5.4-mini",
         "gpt-5-4-nano": "openai/gpt-5.4-nano",
-        # Snapshot pinning aliases
         "gpt-5.4-2026-03-05": "openai/gpt-5.4",
         "gpt-5.4-pro-2026-03-05": "openai/gpt-5.4-pro",
-        # GPT models pass through as-is
-        # Gemini models
+
+        # OpenAI GPT-5.2
+        "gpt-5.2": "openai/gpt-5.2",
+        "gpt-5.2-pro": "openai/gpt-5.2-pro",
+        "gpt-5.2-chat": "openai/gpt-5.2-chat",
+        "gpt5.2": "openai/gpt-5.2",
+        "gpt5.2-pro": "openai/gpt-5.2-pro",
+        "gpt5.2-chat": "openai/gpt-5.2-chat",
+
+        # OpenAI GPT-5.1
+        "gpt-5.1": "openai/gpt-5.1",
+        "gpt-5.1-chat": "openai/gpt-5.1-chat",
+        "gpt5.1": "openai/gpt-5.1",
+        "gpt5.1-chat": "openai/gpt-5.1-chat",
+        # Google Gemini
         "gemini-2.5-pro": "google/gemini-2.5-pro",
         "gemini-pro-2.5": "google/gemini-2.5-pro",
         "gemini-pro": "google/gemini-2.5-pro",
@@ -1444,7 +1635,13 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "gemini-3-flash": "google/gemini-3-flash-preview",
         "gemini3-flash-preview": "google/gemini-3-flash-preview",
         "gemini3-flash": "google/gemini-3-flash-preview",
-        # Grok models
+        # xAI Grok
+        "grok-4.3": "x-ai/grok-4.3",
+        "grok-4-3": "x-ai/grok-4.3",
+        "grok-latest": "x-ai/grok-4.3",
+        "grok-build-0.1": "x-ai/grok-build-0.1",
+        "grok-build": "x-ai/grok-build-0.1",
+        "grok-code-fast-1": "x-ai/grok-build-0.1",
         "grok-4": "x-ai/grok-4",
         "grok-4.1-fast": "x-ai/grok-4.1-fast",
         "grok-4-1-fast": "x-ai/grok-4.1-fast",
@@ -1455,7 +1652,11 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         # Backward-compat for legacy GLM-5 names
         "glm-5": "z-ai/glm-5",
         "glm5": "z-ai/glm-5",
-        # Qwen models
+        # Alibaba Qwen
+        "qwen3.7-max": "qwen/qwen3.7-max",
+        "qwen-3.7-max": "qwen/qwen3.7-max",
+        "qwen3.7-plus": "qwen/qwen3.7-plus",
+        "qwen-3.7-plus": "qwen/qwen3.7-plus",
         "qwen3.6-plus": "qwen/qwen3.6-plus",
         "qwen-3.6-plus": "qwen/qwen3.6-plus",
         "qwen3.6": "qwen/qwen3.6-plus",
@@ -1467,7 +1668,9 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "kimi-k2.6": "moonshotai/kimi-k2.6",
         "kimi-k2-6": "moonshotai/kimi-k2.6",
         "kimi k2.6": "moonshotai/kimi-k2.6",
-        # DeepSeek models
+        # DeepSeek
+        "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
+        "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
         "deepseek-chat-v3.1": "deepseek/deepseek-chat-v3.1",
         "deepseek-v3.1": "deepseek/deepseek-chat-v3.1",
         "deepseek-v3.2": "deepseek/deepseek-v3.2",
@@ -1477,21 +1680,28 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
     }
 
     LIMITS = {
-        # Extended 1M context for Claude Sonnet 4/4.5 via OpenRouter
-        "claude-sonnet-4.5": {"max_input_tokens": 1_000_000, "max_output_tokens": 64000},
-        "claude-sonnet-4": {"max_input_tokens": 1_000_000, "max_output_tokens": 64000},
-
-        # 200k context for other Claude models
-        "claude-opus-4.5": {"max_input_tokens": 200_000, "max_output_tokens": 32000},
-        "claude-opus-4.1": {"max_input_tokens": 200_000, "max_output_tokens": 32000},
-        "claude-opus-4": {"max_input_tokens": 200_000, "max_output_tokens": 32000},
-        "claude-3.7-sonnet": {"max_input_tokens": 200_000, "max_output_tokens": 64000},
-        "claude-3-7-sonnet": {"max_input_tokens": 200_000, "max_output_tokens": 64000},
-        "claude-3.5-haiku": {"max_input_tokens": 200_000, "max_output_tokens": 8192},
-        "claude-3-5-haiku": {"max_input_tokens": 200_000, "max_output_tokens": 8192},
-        "claude-3-haiku": {"max_input_tokens": 200_000, "max_output_tokens": 4096},
+        # Anthropic Claude
+        "claude-sonnet-4.6": {"max_input_tokens": 1_000_000, "max_output_tokens": 64_000},
+        "anthropic/claude-sonnet-4.6": {"max_input_tokens": 1_000_000, "max_output_tokens": 64_000},
+        "claude-sonnet-4-6": {"max_input_tokens": 1_000_000, "max_output_tokens": 64_000},
+        "claude-sonnet-4.5": {"max_input_tokens": 1_000_000, "max_output_tokens": 64_000},
+        "claude-sonnet-4": {"max_input_tokens": 1_000_000, "max_output_tokens": 64_000},
+        "claude-opus-4.8": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000},
+        "anthropic/claude-opus-4.8": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000},
+        "claude-opus-4.5": {"max_input_tokens": 200_000, "max_output_tokens": 32_000},
+        "claude-opus-4.1": {"max_input_tokens": 200_000, "max_output_tokens": 32_000},
+        "claude-opus-4": {"max_input_tokens": 200_000, "max_output_tokens": 32_000},
+        "claude-3.7-sonnet": {"max_input_tokens": 200_000, "max_output_tokens": 64_000},
+        "claude-3-7-sonnet": {"max_input_tokens": 200_000, "max_output_tokens": 64_000},
+        "claude-3.5-haiku": {"max_input_tokens": 200_000, "max_output_tokens": 8_192},
+        "claude-3-5-haiku": {"max_input_tokens": 200_000, "max_output_tokens": 8_192},
+        "claude-3-haiku": {"max_input_tokens": 200_000, "max_output_tokens": 4_096},
 
         # GPT models (OpenRouter routes to OpenAI)
+        "gpt-5.5": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
+        "openai/gpt-5.5": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
+        "gpt-5.5-pro": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
+        "openai/gpt-5.5-pro": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
         "gpt-5": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         "gpt-5-pro": {"max_input_tokens": 400000, "max_output_tokens": 128000},
         # Backward-compat for legacy GPT-5 mini/nano identifiers
@@ -1544,7 +1754,11 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "gemini-3-flash-preview": {"max_input_tokens": 1_048_576, "max_output_tokens": 65536},
         "google/gemini-3-flash-preview": {"max_input_tokens": 1_048_576, "max_output_tokens": 65536},
 
-        # Grok model
+        # xAI Grok
+        "grok-4.3": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000},
+        "x-ai/grok-4.3": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000},
+        "grok-build-0.1": {"max_input_tokens": 256_000, "max_output_tokens": 32_768},
+        "x-ai/grok-build-0.1": {"max_input_tokens": 256_000, "max_output_tokens": 32_768},
         "grok-4": {"max_input_tokens": 256_000, "max_output_tokens": 32768},
         "x-ai/grok-4": {"max_input_tokens": 256_000, "max_output_tokens": 32768},
         # Grok 4.1 Fast (2M context, ~30k output as per xAI/OpenRouter docs)
@@ -1559,7 +1773,11 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "glm-5.1": {"max_input_tokens": 202_752, "max_output_tokens": 65_536},
         "z-ai/glm-5.1": {"max_input_tokens": 202_752, "max_output_tokens": 65_536},
 
-        # Qwen 3.6 Plus (1M context, 65.5k output per OpenRouter listing)
+        # Alibaba Qwen
+        "qwen3.7-max": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_536},
+        "qwen/qwen3.7-max": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_536},
+        "qwen3.7-plus": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_536},
+        "qwen/qwen3.7-plus": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_536},
         "qwen3.6-plus": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_536},
         "qwen/qwen3.6-plus": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_536},
 
@@ -1571,14 +1789,17 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "kimi-k2.6": {"max_input_tokens": 262_144, "max_output_tokens": 262_144},
         "moonshotai/kimi-k2.6": {"max_input_tokens": 262_144, "max_output_tokens": 262_144},
 
-        # DeepSeek model
+        # DeepSeek
+        "deepseek-v4-pro": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_536},
+        "deepseek/deepseek-v4-pro": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_536},
+        "deepseek-v4-flash": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_536},
+        "deepseek/deepseek-v4-flash": {"max_input_tokens": 1_000_000, "max_output_tokens": 65_536},
         "deepseek-chat-v3.1": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
         "deepseek/deepseek-chat-v3.1": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
         "deepseek-v3.2": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
         "deepseek/deepseek-v3.2": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
         "deepseek-v3.2-speciale": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
         "deepseek/deepseek-v3.2-speciale": {"max_input_tokens": 163_840, "max_output_tokens": 8192},
-
         # Llama models
         "llama-3.3": {"max_input_tokens": 128000, "max_output_tokens": 8192},
         "llama-3.1": {"max_input_tokens": 128000, "max_output_tokens": 8192},
@@ -1610,6 +1831,14 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
             default_headers=default_headers if default_headers else None,
             **kwargs
         )
+        self._pricing_map: Dict[str, ModelPricing] = dict(STATIC_MODEL_PRICING)
+
+    def refresh_pricing(self, *, timeout: float = 20.0) -> Dict[str, ModelPricing]:
+        """Explicitly refresh OpenRouter base pricing; never called on the request path."""
+        refreshed = load_openrouter_pricing(self.api_key, timeout=timeout)
+        if refreshed:
+            self._pricing_map = refreshed
+        return dict(self._pricing_map)
 
     def _transform_model_name(self, model: str) -> str:
         """Transform friendly model names to OpenRouter slugs."""
@@ -1619,19 +1848,20 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
 
         short_names = {
             "haiku": "anthropic/claude-3-haiku",
-            "sonnet": "anthropic/claude-3.7-sonnet",
-            "opus": "anthropic/claude-opus-4",
+            "sonnet": "anthropic/claude-sonnet-4.6",
+            "opus": "anthropic/claude-opus-4.8",
             "gemini": "google/gemini-3.1-pro-preview",
-            "grok": "x-ai/grok-4",
-            "deepseek": "deepseek/deepseek-v3.2",
+            "grok": "x-ai/grok-4.3",
+            "deepseek": "deepseek/deepseek-v4-pro",
         }
 
         name_key = model.lower().strip()
         if name_key in short_names:
             return short_names[name_key]
         
-        # Try to find a mapping
         lower_model = name_key
+        if lower_model in self._MODEL_SLUGS:
+            return self._MODEL_SLUGS[lower_model]
         for key, slug in self._MODEL_SLUGS.items():
             if key in lower_model:
                 return slug
@@ -1668,11 +1898,30 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         model: str,
         max_tokens: Optional[int],
         deepthink: Optional[bool],
+        provider_options: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
-        base_extra = super()._build_extra_body(model, max_tokens, deepthink) or {}
+        base_extra = super()._build_extra_body(model, max_tokens, deepthink, provider_options) or {}
         extra_body: Dict[str, Any] = dict(base_extra)
 
         transformed = self._transform_model_name(model)
+        opts = _normalize_openrouter_options(provider_options)
+        session_id = opts.get("session_id")
+        if session_id:
+            session_id = str(session_id)
+            if len(session_id) > 256:
+                raise ValueError("OpenRouter session_id must be at most 256 characters")
+            extra_body["session_id"] = session_id
+        provider = opts.get("provider")
+        if provider is not None:
+            if not isinstance(provider, dict):
+                raise TypeError("OpenRouter provider option must be a dict")
+            extra_body["provider"] = dict(provider)
+        prompt_cache = opts.get("prompt_cache", True)
+        prompt_cache_mode = str(opts.get("prompt_cache_mode") or "auto").lower()
+        if prompt_cache_mode not in {"auto", "explicit", "off"}:
+            raise ValueError("prompt_cache_mode must be 'auto', 'explicit', or 'off'")
+        if prompt_cache and prompt_cache_mode == "auto" and transformed.startswith("anthropic/claude"):
+            extra_body["cache_control"] = _cache_control_object(opts.get("prompt_cache_ttl"))
         
         # For reasoning models, request encrypted content for stateless replay
         # This ensures the reasoning state is self-contained and doesn't require
@@ -1698,6 +1947,21 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
             extra_body["max_output_tokens"] = desired_tokens
 
         return extra_body or None
+
+    def _build_openrouter_headers(
+        self,
+        options: Optional[Union[OpenRouterOptions, Dict[str, Any]]] = None,
+    ) -> Dict[str, str]:
+        opts = _normalize_openrouter_options(options)
+        headers: Dict[str, str] = {}
+        if opts.get("response_cache") is not None:
+            headers["X-OpenRouter-Cache"] = "true" if opts["response_cache"] else "false"
+        if opts.get("response_cache_ttl") is not None:
+            ttl = max(1, min(86400, int(opts["response_cache_ttl"])))
+            headers["X-OpenRouter-Cache-TTL"] = str(ttl)
+        if opts.get("response_cache_clear"):
+            headers["X-OpenRouter-Cache-Clear"] = "true"
+        return headers
 
     def _get_openrouter_input_modalities(self) -> Dict[str, List[str]]:
         now = time.time()
@@ -1774,6 +2038,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         temperature: float,
         max_tokens: Optional[int] = None,
         deepthink: Optional[bool] = None,
+        provider_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, int, Dict[str, Any]]:
         return super().chat_completion(
             self._strip_images_if_model_is_text_only(messages, model),
@@ -1781,6 +2046,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
             temperature,
             max_tokens,
             deepthink,
+            provider_options,
         )
 
     @retry_on_rate_limit
@@ -1792,6 +2058,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         temperature: float,
         max_tokens: Optional[int] = None,
         deepthink: Optional[bool] = None,
+        provider_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         """
         Structured output with schema support.
@@ -1805,10 +2072,14 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         stripped_messages = self._strip_images_if_model_is_text_only(messages, model)
         if self._supports_native_structured_output(model):
             # Use native structured output (OpenAI, etc.)
-            return super().chat_completion_with_schema(stripped_messages, schema, model, temperature, max_tokens, deepthink)
+            return super().chat_completion_with_schema(
+                stripped_messages, schema, model, temperature, max_tokens, deepthink, provider_options
+            )
         
         # Use tool-based workaround for Claude and other models without native support
-        return self.chat_completion_with_schema_via_tools(stripped_messages, schema, model, temperature, max_tokens, deepthink)
+        return self.chat_completion_with_schema_via_tools(
+            stripped_messages, schema, model, temperature, max_tokens, deepthink, provider_options
+        )
 
     def chat_completion_with_tools(
         self,
@@ -1820,6 +2091,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         parallel_tool_calls: Optional[bool] = None,
         deepthink: Optional[bool] = None,
         tool_choice: str = "required",
+        provider_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         return super().chat_completion_with_tools(
             self._strip_images_if_model_is_text_only(messages, model),
@@ -1830,6 +2102,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
             parallel_tool_calls,
             deepthink,
             tool_choice,
+            provider_options,
         )
 
 
@@ -2075,6 +2348,7 @@ class ProviderManager:
         keep_newest: bool,
         enable_caching: bool = True,
         reserve_ratio: Optional[float] = None,
+        provider_options: Optional[Dict[str, Any]] = None,
     ) -> List[BaseMessage]:
         lc_messages = ensure_langchain_messages(messages)
         cleaned = remove_orphaned_tool_results_lc(lc_messages, verbose=self._verbose)
@@ -2089,8 +2363,18 @@ class ProviderManager:
         # APPLY PROMPT CACHING optimizations
         # For Claude: converts system message to multipart format with cache_control
         # For OpenAI/Gemini: no changes needed (auto-caching based on stable prefix)
-        if enable_caching:
-            cleaned = _apply_prompt_caching(cleaned, model_name, enable_caching=True)
+        opts = _normalize_openrouter_options(provider_options)
+        if (
+            enable_caching
+            and opts.get("prompt_cache", True)
+            and str(opts.get("prompt_cache_mode") or "auto").lower() == "explicit"
+        ):
+            cleaned = _apply_prompt_caching(
+                cleaned,
+                model_name,
+                cache_ttl=opts.get("prompt_cache_ttl"),
+                enable_caching=True,
+            )
 
         setting = input_truncation if input_truncation is not None else self._default_input_truncation
         max_tokens = self._resolve_limit(provider_name, model_name, setting)
@@ -2135,6 +2419,7 @@ class ProviderManager:
         keep_newest: bool = True,
         reserve_ratio: Optional[float] = None,
         fallback_models: Optional[List[str]] = None,
+        provider_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, int, Dict[str, Any]]:
         def runner(active_model: str) -> Tuple[str, int, Dict[str, Any]]:
             provider_name, model_name, active_deepthink = self._normalize_model_for_request(active_model, deepthink)
@@ -2146,8 +2431,9 @@ class ProviderManager:
                 input_truncation=input_truncation,
                 keep_newest=keep_newest,
                 reserve_ratio=reserve_ratio,
+                provider_options=provider_options,
             )
-            return provider.chat_completion(prepared, model_name, temperature, max_tokens, active_deepthink)
+            return provider.chat_completion(prepared, model_name, temperature, max_tokens, active_deepthink, provider_options)
 
         return self._run_with_model_fallbacks(
             primary_model=model,
@@ -2168,6 +2454,7 @@ class ProviderManager:
         keep_newest: bool = True,
         reserve_ratio: Optional[float] = None,
         fallback_models: Optional[List[str]] = None,
+        provider_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         def runner(active_model: str) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
             provider_name, model_name, active_deepthink = self._normalize_model_for_request(active_model, deepthink)
@@ -2179,6 +2466,7 @@ class ProviderManager:
                 input_truncation=input_truncation,
                 keep_newest=keep_newest,
                 reserve_ratio=reserve_ratio,
+                provider_options=provider_options,
             )
             return provider.chat_completion_with_schema(
                 prepared,
@@ -2187,6 +2475,7 @@ class ProviderManager:
                 temperature,
                 max_tokens,
                 active_deepthink,
+                provider_options,
             )
 
         return self._run_with_model_fallbacks(
@@ -2210,6 +2499,7 @@ class ProviderManager:
         keep_newest: bool = True,
         reserve_ratio: Optional[float] = None,
         fallback_models: Optional[List[str]] = None,
+        provider_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         def runner(active_model: str) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
             provider_name, model_name, active_deepthink = self._normalize_model_for_request(active_model, deepthink)
@@ -2221,6 +2511,7 @@ class ProviderManager:
                 input_truncation=input_truncation,
                 keep_newest=keep_newest,
                 reserve_ratio=reserve_ratio,
+                provider_options=provider_options,
             )
             return provider.chat_completion_with_tools(
                 prepared,
@@ -2231,6 +2522,7 @@ class ProviderManager:
                 parallel_tool_calls,
                 active_deepthink,
                 tool_choice,
+                provider_options,
             )
 
         return self._run_with_model_fallbacks(
@@ -2243,5 +2535,6 @@ __all__ = [
     "BaseProvider",
     "BaseOpenAICompatibleProvider",
     "OpenRouterProvider",
+    "OpenRouterOptions",
     "ProviderManager",
 ]

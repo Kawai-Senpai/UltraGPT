@@ -32,7 +32,10 @@ pip-delete-this-directory.txt
 *.swp
 *.swo
 *~
-tests/
+# Legacy/manual tests remain ignored; committed pytest tests live under tests/unit.
+tests/*
+!tests/unit/
+!tests/unit/**
 .project
 .pydevproject
 .settings/
@@ -60,6 +63,7 @@ tmp_tests/
 
 # Cache directories
 cache/
+__pycache__
 
 # Todo (internal notes)
 todo/
