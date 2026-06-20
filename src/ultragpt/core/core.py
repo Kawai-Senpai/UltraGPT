@@ -174,6 +174,52 @@ class UltraGPT:
         )
 
 
+    def supports_modality(self, model: str, modality: str = "image") -> bool:
+        """Return True only if `model` is confirmed to accept the given input modality.
+
+        Use this to decide whether to send/render images for a model. Unknown models and
+        lookup failures return False (fail safe). Defaults to checking image support.
+        """
+        return self.provider_manager.does_support_modality(model, modality)
+
+    def embed(
+        self,
+        text: str,
+        model: str = "text-embedding-3-large",
+        *,
+        timeout: float = 30.0,
+        dimensions: Optional[int] = None,
+    ) -> List[float]:
+        """Embed a single string and return its vector. Retries on rate limits."""
+        vectors = self.embed_batch([text], model, timeout=timeout, dimensions=dimensions)
+        return vectors[0] if vectors else []
+
+    def embed_batch(
+        self,
+        texts: List[str],
+        model: str = "text-embedding-3-large",
+        *,
+        timeout: float = 30.0,
+        dimensions: Optional[int] = None,
+        batch_size: int = 100,
+    ) -> List[List[float]]:
+        """Embed many strings, returning one vector per input in order.
+
+        Splits large inputs into chunks of batch_size to stay within provider limits.
+        Retries on rate limits per chunk (handled in the provider).
+        """
+        if not texts:
+            return []
+        provider = self.provider_manager.get_provider("openrouter")
+        out: List[List[float]] = []
+        for start in range(0, len(texts), max(1, batch_size)):
+            chunk = texts[start:start + max(1, batch_size)]
+            out.extend(
+                provider.create_embeddings(chunk, model, timeout=timeout, dimensions=dimensions)
+            )
+        return out
+
+
     @staticmethod
     def _ensure_lc_messages(messages: List[Any]) -> List[BaseMessage]:
         return ensure_langchain_messages(messages)

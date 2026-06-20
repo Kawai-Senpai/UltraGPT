@@ -1833,6 +1833,49 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         )
         self._pricing_map: Dict[str, ModelPricing] = dict(STATIC_MODEL_PRICING)
 
+    @retry_on_rate_limit
+    def create_embeddings(
+        self,
+        inputs: Union[str, List[str]],
+        model: str,
+        *,
+        timeout: float = 30.0,
+        dimensions: Optional[int] = None,
+    ) -> List[List[float]]:
+        """Create embeddings for one or more texts via OpenRouter's /embeddings endpoint.
+
+        Always returns a list of vectors (one per input), in input order. A single string
+        input still returns a one-element list for a uniform contract. Rate limits are
+        retried by the decorator; other HTTP errors raise.
+        """
+        if inputs is None:
+            raise ValueError("inputs must be a string or list of strings")
+        single = isinstance(inputs, str)
+        batch: List[str] = [inputs] if single else list(inputs)
+        if not batch:
+            return []
+        if any(not isinstance(x, str) for x in batch):
+            raise ValueError("all embedding inputs must be strings")
+
+        url = f"{self.base_url.rstrip('/')}/embeddings"
+        headers: Dict[str, str] = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        if self.default_headers:
+            headers.update(self.default_headers)
+
+        payload: Dict[str, Any] = {"model": model, "input": batch}
+        if dimensions is not None:
+            payload["dimensions"] = dimensions
+
+        response = httpx.post(url, headers=headers, json=payload, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        # OpenAI-compatible: {"data": [{"index": i, "embedding": [...]}, ...]}
+        items = sorted(data.get("data", []) or [], key=lambda d: d.get("index", 0))
+        return [item.get("embedding", []) for item in items]
+
     def refresh_pricing(self, *, timeout: float = 20.0) -> Dict[str, ModelPricing]:
         """Explicitly refresh OpenRouter base pricing; never called on the request path."""
         refreshed = load_openrouter_pricing(self.api_key, timeout=timeout)
@@ -2313,6 +2356,27 @@ class ProviderManager:
             if hasattr(provider, '_does_support_thinking'):
                 return provider._does_support_thinking(model_name)
             
+            return False
+        except Exception:  # noqa: BLE001
+            return False
+
+    def does_support_modality(self, model: str, modality: str = "image") -> bool:
+        """Check whether the model accepts the given INPUT modality (e.g. 'image').
+
+        Returns True only when we can positively confirm support; unknown models and
+        any lookup failure return False so callers can fail safe (skip image work).
+        """
+        try:
+            cleaned_model, _ = self._strip_virtual_effort_suffix(model)
+            provider_name, model_name = self.parse_model_string(cleaned_model)
+            provider = self.get_provider(provider_name)
+
+            modality = (modality or "image").lower()
+            # OpenRouter exposes per-model input modalities; reuse that when available.
+            if modality == "image" and hasattr(provider, "_openrouter_model_supports_images"):
+                return bool(provider._openrouter_model_supports_images(model_name))
+            if hasattr(provider, "_model_supports_modality"):
+                return bool(provider._model_supports_modality(model_name, modality))
             return False
         except Exception:  # noqa: BLE001
             return False
