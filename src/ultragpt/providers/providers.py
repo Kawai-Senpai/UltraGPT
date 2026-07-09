@@ -235,6 +235,7 @@ def retry_on_rate_limit(func):
 # Models that require explicit cache_control markers (others auto-cache)
 EXPLICIT_CACHE_MODELS = [
     "anthropic/claude",  # All Claude models via OpenRouter need explicit cache_control
+    "~anthropic/claude",  # OpenRouter latest-alias Claude routes need the same treatment
 ]
 
 # Default cache TTL for explicit caching (1 hour for long agent sessions)
@@ -1529,6 +1530,8 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "anthropic/claude-sonnet",  # Claude Sonnet family supports reasoning tokens
         "anthropic/claude-3.7-sonnet",  # Explicit prefix for 3.7 Sonnet slug
         "anthropic/claude-opus",  # Claude Opus family supports reasoning tokens
+        "anthropic/claude-fable",  # Claude Fable family supports reasoning tokens
+        "~anthropic/claude-fable",  # OpenRouter latest-alias Claude Fable route
         "deepseek/deepseek-chat",  # DeepSeek v3.1 reasoning traces via effort flag
         "deepseek/deepseek-v3.2",  # DeepSeek v3.2 reasoning traces via reasoning.enabled
         "deepseek/deepseek-v4",  # DeepSeek V4 Pro/Flash reasoning family
@@ -1544,6 +1547,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
     # Need tool-based workaround (convert schema to tool)
     NO_NATIVE_STRUCTURED_OUTPUT = [
         "anthropic/claude",  # All Claude models via OpenRouter don't support native structured output
+        "~anthropic/claude",  # Same for OpenRouter latest-alias Claude routes
         "openai/gpt-5.4-pro",  # GPT-5.4 Pro is Responses-only; avoid native structured output
         "openai/gpt-5.5-pro",
     ]
@@ -1568,6 +1572,16 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "claude-sonnet-4.5": "anthropic/claude-sonnet-4.5",
         "claude-sonnet-4-5": "anthropic/claude-sonnet-4.5",
         "claude-sonnet-4": "anthropic/claude-sonnet-4",
+
+        # Anthropic Claude Fable
+        "claude-fable-5": "anthropic/claude-fable-5",
+        "claude-fable-5-20260609": "anthropic/claude-fable-5",
+        "claude-5-fable-20260609": "anthropic/claude-fable-5",
+        "fable-5": "anthropic/claude-fable-5",
+        "fable5": "anthropic/claude-fable-5",
+        "fable": "anthropic/claude-fable-5",
+        "claude-fable-latest": "~anthropic/claude-fable-latest",
+        "fable-latest": "~anthropic/claude-fable-latest",
 
         # Anthropic Claude Opus
         "claude-opus-4.8": "anthropic/claude-opus-4.8",
@@ -1646,6 +1660,9 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "grok-4.1-fast": "x-ai/grok-4.1-fast",
         "grok-4-1-fast": "x-ai/grok-4.1-fast",
         # Z.AI / GLM models
+        "glm-5.2": "z-ai/glm-5.2",
+        "glm5.2": "z-ai/glm-5.2",
+        "glm-5-2": "z-ai/glm-5.2",
         "glm-5.1": "z-ai/glm-5.1",
         "glm5.1": "z-ai/glm-5.1",
         "glm-5-1": "z-ai/glm-5.1",
@@ -1686,6 +1703,9 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "claude-sonnet-4-6": {"max_input_tokens": 1_000_000, "max_output_tokens": 64_000},
         "claude-sonnet-4.5": {"max_input_tokens": 1_000_000, "max_output_tokens": 64_000},
         "claude-sonnet-4": {"max_input_tokens": 1_000_000, "max_output_tokens": 64_000},
+        "claude-fable-5": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000},
+        "anthropic/claude-fable-5": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000},
+        "~anthropic/claude-fable-latest": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000},
         "claude-opus-4.8": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000},
         "anthropic/claude-opus-4.8": {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000},
         "claude-opus-4.5": {"max_input_tokens": 200_000, "max_output_tokens": 32_000},
@@ -1764,6 +1784,10 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         # Grok 4.1 Fast (2M context, ~30k output as per xAI/OpenRouter docs)
         "grok-4.1-fast": {"max_input_tokens": 2_000_000, "max_output_tokens": 30_000},
         "x-ai/grok-4.1-fast": {"max_input_tokens": 2_000_000, "max_output_tokens": 30_000},
+
+        # Z.AI GLM-5.2 (1M context, 128k output per Z.AI/OpenRouter listing)
+        "glm-5.2": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
+        "z-ai/glm-5.2": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
 
         # Z.AI GLM-5 (legacy, keep for backward compatibility)
         "glm-5": {"max_input_tokens": 202_752, "max_output_tokens": 128_000},
@@ -1893,6 +1917,8 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
             "haiku": "anthropic/claude-3-haiku",
             "sonnet": "anthropic/claude-sonnet-4.6",
             "opus": "anthropic/claude-opus-4.8",
+            "fable": "anthropic/claude-fable-5",
+            "glm": "z-ai/glm-5.2",
             "gemini": "google/gemini-3.1-pro-preview",
             "grok": "x-ai/grok-4.3",
             "deepseek": "deepseek/deepseek-v4-pro",
@@ -1963,7 +1989,7 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         prompt_cache_mode = str(opts.get("prompt_cache_mode") or "auto").lower()
         if prompt_cache_mode not in {"auto", "explicit", "off"}:
             raise ValueError("prompt_cache_mode must be 'auto', 'explicit', or 'off'")
-        if prompt_cache and prompt_cache_mode == "auto" and transformed.startswith("anthropic/claude"):
+        if prompt_cache and prompt_cache_mode == "auto" and transformed.startswith(("anthropic/claude", "~anthropic/claude")):
             extra_body["cache_control"] = _cache_control_object(opts.get("prompt_cache_ttl"))
         
         # For reasoning models, request encrypted content for stateless replay

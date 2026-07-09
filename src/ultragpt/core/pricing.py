@@ -30,6 +30,25 @@ class ModelPricing:
 
 
 STATIC_MODEL_PRICING: Dict[str, ModelPricing] = {
+    "openai/gpt-5.5": ModelPricing(
+        input_per_million=5.0,
+        output_per_million=30.0,
+        cache=CachePricing(read_multiplier=0.1),
+    ),
+    "z-ai/glm-5.2": ModelPricing(
+        input_per_million=0.84,
+        output_per_million=2.64,
+    ),
+    "anthropic/claude-fable-5": ModelPricing(
+        input_per_million=10.0,
+        output_per_million=50.0,
+        cache=CachePricing(0.1, 1.25, 2.0, 1.25),
+    ),
+    "~anthropic/claude-fable-latest": ModelPricing(
+        input_per_million=10.0,
+        output_per_million=50.0,
+        cache=CachePricing(0.1, 1.25, 2.0, 1.25),
+    ),
     "anthropic/claude-sonnet-4.6": ModelPricing(
         input_per_million=3.0,
         output_per_million=15.0,
@@ -45,8 +64,10 @@ STATIC_MODEL_PRICING: Dict[str, ModelPricing] = {
 
 def attach_cache_rules(model: str, pricing: ModelPricing) -> ModelPricing:
     lower = model.lower()
-    if lower.startswith("anthropic/claude"):
+    if lower.startswith(("anthropic/claude", "~anthropic/claude")):
         cache = CachePricing(0.1, 1.25, 2.0, 1.25)
+    elif lower.startswith("openai/gpt-5.5"):
+        cache = CachePricing(read_multiplier=0.1)
     elif lower.startswith("x-ai/grok"):
         cache = CachePricing(read_multiplier=0.25, write_multiplier_default=0.0)
     elif lower.startswith("deepseek/"):
