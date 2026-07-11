@@ -255,6 +255,10 @@ class OpenRouterOptions:
     response_cache_ttl: Optional[int] = None
     response_cache_clear: bool = False
 
+    # GPT-5.6 reasoning controls (Pro mode etc.)
+    reasoning_mode: Optional[str] = None
+    reasoning_context: Optional[str] = None
+
 
 def _normalize_openrouter_options(
     options: Optional[Union[OpenRouterOptions, Dict[str, Any]]],
@@ -566,7 +570,7 @@ class BaseOpenAICompatibleProvider(BaseProvider):
         return self._build_llm(model=model, temperature=temperature, max_tokens=max_tokens)
 
     # Valid reasoning effort levels accepted via the virtual ::suffix system.
-    VALID_EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+    VALID_EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
 
     # Model-specific effort aliases (prefix match on transformed model name).
     # Example: {"openai/gpt-5.4": {"minimal": "low"}}
@@ -1597,6 +1601,25 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "claude-3.5-haiku": "anthropic/claude-3.5-haiku",
         "claude-3-5-haiku": "anthropic/claude-3.5-haiku",
         "claude-3-haiku": "anthropic/claude-3-haiku",
+        # OpenAI GPT-5.6
+        # Keep explicit tier names before the generic gpt-5.6 alias.
+        "gpt-5.6-sol": "openai/gpt-5.6-sol",
+        "gpt5.6-sol": "openai/gpt-5.6-sol",
+        "gpt-5-6-sol": "openai/gpt-5.6-sol",
+
+        "gpt-5.6-terra": "openai/gpt-5.6-terra",
+        "gpt5.6-terra": "openai/gpt-5.6-terra",
+        "gpt-5-6-terra": "openai/gpt-5.6-terra",
+
+        "gpt-5.6-luna": "openai/gpt-5.6-luna",
+        "gpt5.6-luna": "openai/gpt-5.6-luna",
+        "gpt-5-6-luna": "openai/gpt-5.6-luna",
+
+        # OpenAI's unsuffixed GPT-5.6 alias routes to Sol.
+        "gpt-5.6": "openai/gpt-5.6-sol",
+        "gpt5.6": "openai/gpt-5.6-sol",
+        "gpt-5-6": "openai/gpt-5.6-sol",
+
         # OpenAI GPT-5.5
         "gpt-5.5-pro": "openai/gpt-5.5-pro",
         "gpt5.5-pro": "openai/gpt-5.5-pro",
@@ -1718,6 +1741,15 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         "claude-3-haiku": {"max_input_tokens": 200_000, "max_output_tokens": 4_096},
 
         # GPT models (OpenRouter routes to OpenAI)
+        # OpenAI GPT-5.6 (max_input_tokens stores the total context window;
+        # the limiter applies its reserve ratio afterward).
+        "gpt-5.6": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
+        "gpt-5.6-sol": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
+        "openai/gpt-5.6-sol": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
+        "gpt-5.6-terra": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
+        "openai/gpt-5.6-terra": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
+        "gpt-5.6-luna": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
+        "openai/gpt-5.6-luna": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
         "gpt-5.5": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
         "openai/gpt-5.5": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
         "gpt-5.5-pro": {"max_input_tokens": 1_050_000, "max_output_tokens": 128_000},
@@ -1922,6 +1954,12 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
             "gemini": "google/gemini-3.1-pro-preview",
             "grok": "x-ai/grok-4.3",
             "deepseek": "deepseek/deepseek-v4-pro",
+
+            # GPT-5.6 exact shortcuts (kept out of _MODEL_SLUGS so substring
+            # matching never turns "solar"/"solution" into gpt-5.6-sol).
+            "sol": "openai/gpt-5.6-sol",
+            "terra": "openai/gpt-5.6-terra",
+            "luna": "openai/gpt-5.6-luna",
         }
 
         name_key = model.lower().strip()
@@ -2015,6 +2053,30 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
                 desired_tokens = self._guess_max_output_tokens(model) or config.DEFAULT_MAX_OUTPUT_TOKENS
             extra_body["max_output_tokens"] = desired_tokens
 
+        # GPT-5.6 Pro mode: keep the Sol/Terra/Luna slug and set reasoning.mode
+        # rather than switching to a separate Pro slug.
+        if transformed.startswith("openai/gpt-5.6"):
+            reasoning = dict(extra_body.get("reasoning") or {})
+
+            reasoning_mode = opts.get("reasoning_mode")
+            if reasoning_mode is not None:
+                reasoning_mode = str(reasoning_mode).lower()
+                if reasoning_mode not in {"standard", "pro"}:
+                    raise ValueError("reasoning_mode must be 'standard' or 'pro'")
+                reasoning["mode"] = reasoning_mode
+
+            reasoning_context = opts.get("reasoning_context")
+            if reasoning_context is not None:
+                reasoning_context = str(reasoning_context).lower()
+                if reasoning_context not in {"auto", "all_turns", "current_turn"}:
+                    raise ValueError(
+                        "reasoning_context must be 'auto', 'all_turns', or 'current_turn'"
+                    )
+                reasoning["context"] = reasoning_context
+
+            if reasoning:
+                extra_body["reasoning"] = reasoning
+
         return extra_body or None
 
     def _build_openrouter_headers(
@@ -2072,8 +2134,22 @@ class OpenRouterProvider(BaseOpenAICompatibleProvider):
         self._model_input_modalities_cache_ts = now
         return modalities
 
+    # Known multimodal models whose image support must not depend on a live
+    # OpenRouter metadata request. A stale/failed /models call would otherwise
+    # be treated as text-only and silently strip the user's images.
+    STATIC_IMAGE_INPUT_MODELS = frozenset({
+        "openai/gpt-5.6-sol",
+        "openai/gpt-5.6-terra",
+        "openai/gpt-5.6-luna",
+    })
+
     def _openrouter_model_supports_images(self, model: str) -> bool:
         transformed = self._transform_model_name(_strip_virtual_model_suffix(model))
+
+        # Known static capabilities should not depend on a metadata request.
+        if transformed in self.STATIC_IMAGE_INPUT_MODELS:
+            return True
+
         input_modalities = self._get_openrouter_input_modalities().get(transformed)
         if not input_modalities:
             return False
@@ -2216,7 +2292,7 @@ class ProviderManager:
         """Strip a virtual ``::effort`` suffix from a model string.
 
         Returns ``(cleaned_model, effort)`` where *effort* is one of
-        ``none | minimal | low | medium | high | xhigh`` or ``None``
+        ``none | minimal | low | medium | high | xhigh | max`` or ``None``
         when no recognised suffix is present.
         """
         cleaned = (model or "").strip()

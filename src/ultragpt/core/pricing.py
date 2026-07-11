@@ -29,7 +29,35 @@ class ModelPricing:
     source: str = "static"
 
 
+# OpenAI GPT-5.6 tiers. Cache reads get a 90% input discount; cache writes cost
+# 1.25x normal input. The 272K long-context surcharge (2x input / 1.5x output for
+# the whole request) is applied in estimate_cost, not baked into these rates.
+_GPT_56_SOL = ModelPricing(
+    input_per_million=5.0,
+    output_per_million=30.0,
+    cache=CachePricing(read_multiplier=0.1, write_multiplier_default=1.25),
+)
+_GPT_56_TERRA = ModelPricing(
+    input_per_million=2.5,
+    output_per_million=15.0,
+    cache=CachePricing(read_multiplier=0.1, write_multiplier_default=1.25),
+)
+_GPT_56_LUNA = ModelPricing(
+    input_per_million=1.0,
+    output_per_million=6.0,
+    cache=CachePricing(read_multiplier=0.1, write_multiplier_default=1.25),
+)
+
+
 STATIC_MODEL_PRICING: Dict[str, ModelPricing] = {
+    # OpenAI GPT-5.6 (OpenRouter slugs + friendly aliases; gpt-5.6 == Sol)
+    "openai/gpt-5.6-sol": _GPT_56_SOL,
+    "gpt-5.6-sol": _GPT_56_SOL,
+    "gpt-5.6": _GPT_56_SOL,
+    "openai/gpt-5.6-terra": _GPT_56_TERRA,
+    "gpt-5.6-terra": _GPT_56_TERRA,
+    "openai/gpt-5.6-luna": _GPT_56_LUNA,
+    "gpt-5.6-luna": _GPT_56_LUNA,
     "openai/gpt-5.5": ModelPricing(
         input_per_million=5.0,
         output_per_million=30.0,
@@ -66,6 +94,8 @@ def attach_cache_rules(model: str, pricing: ModelPricing) -> ModelPricing:
     lower = model.lower()
     if lower.startswith(("anthropic/claude", "~anthropic/claude")):
         cache = CachePricing(0.1, 1.25, 2.0, 1.25)
+    elif lower.startswith("openai/gpt-5.6"):
+        cache = CachePricing(read_multiplier=0.1, write_multiplier_default=1.25)
     elif lower.startswith("openai/gpt-5.5"):
         cache = CachePricing(read_multiplier=0.1)
     elif lower.startswith("x-ai/grok"):
@@ -102,10 +132,18 @@ def estimate_cost(
     )
     regular_input_tokens = max(0, input_tokens - cached_input_tokens - cache_write_tokens)
 
-    input_cost = regular_input_tokens * pricing.input_per_million / 1_000_000
-    output_cost = output_tokens * pricing.output_per_million / 1_000_000
-    cache_read_cost = cached_input_tokens * pricing.input_per_million / 1_000_000
-    cache_write_cost = cache_write_tokens * pricing.input_per_million / 1_000_000
+    # GPT-5.6 long-context surcharge: requests over 272K input tokens are billed
+    # at 2x input / 1.5x output for the ENTIRE request, not just the overflow.
+    input_per_million = pricing.input_per_million
+    output_per_million = pricing.output_per_million
+    if model.startswith("openai/gpt-5.6") and input_tokens > 272_000:
+        input_per_million *= 2.0
+        output_per_million *= 1.5
+
+    input_cost = regular_input_tokens * input_per_million / 1_000_000
+    output_cost = output_tokens * output_per_million / 1_000_000
+    cache_read_cost = cached_input_tokens * input_per_million / 1_000_000
+    cache_write_cost = cache_write_tokens * input_per_million / 1_000_000
 
     if pricing.cache:
         if pricing.cache.read_multiplier is not None:
