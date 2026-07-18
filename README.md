@@ -253,6 +253,25 @@ response, tokens, details = ultra.tool_call(
 )
 ```
 
+### Stable System Prompts for Prompt Caching
+
+By default, UltraGPT adds tool usage guides to a system message for backward
+compatibility. Native function calling already sends tool names, descriptions,
+strict input schemas, and parameter descriptions separately. Applications that
+need a byte-stable system prompt can opt out of the duplicated system text:
+
+```python
+response, tokens, details = ultra.tool_call(
+    messages=messages,
+    user_tools=active_tools,
+    include_tool_prompt=False,
+)
+```
+
+The tools remain fully callable. Only the generated `Available Tools` system
+message is omitted. Extended application-specific guidance can still be
+provided through tool results or discovery tools.
+
 ### Tool Calling with Native Reasoning
 ```python
 # Reasoning models preserve context across tool loops

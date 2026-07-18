@@ -434,6 +434,7 @@ class UltraGPT:
         deepthink: Optional[bool] = None,
         reserve_ratio: Optional[float] = None,
         fallback_models: Optional[List[str]] = None,
+        include_tool_prompt: bool = True,
     ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
         model = model or config.DEFAULT_MODEL
         temperature = temperature if temperature is not None else config.DEFAULT_TEMPERATURE
@@ -448,7 +449,11 @@ class UltraGPT:
         validated_tools = self.tool_manager.validate_user_tools(user_tools)
         # Use rich tool prompt with allow_multiple based on parallel_tool_calls
         allow_multiple = parallel_tool_calls if parallel_tool_calls is not None else True
-        instruction_prompt = self._build_tool_instruction_prompt(validated_tools, allow_multiple)
+        instruction_prompt = (
+            self._build_tool_instruction_prompt(validated_tools, allow_multiple)
+            if include_tool_prompt
+            else None
+        )
         prepared_messages = integrate_tool_call_prompt(messages, instruction_prompt) if instruction_prompt else messages
 
         return self.chat_flow.chat_with_model_tools(
@@ -829,6 +834,7 @@ class UltraGPT:
         max_tokens: Optional[int] = None,
         fallback_models: Optional[List[str]] = None,
         openrouter_options: Optional[Union[OpenRouterOptions, Dict[str, Any]]] = None,
+        include_tool_prompt: bool = True,
     ) -> Tuple[Any, int, Dict[str, Any]]:
     
         model = model or config.DEFAULT_MODEL
@@ -846,14 +852,20 @@ class UltraGPT:
         effective_openrouter_options = self._merge_openrouter_options(openrouter_options)
 
         validated_tools = self.tool_manager.validate_user_tools(user_tools)
-        tool_prompt = (
-            generate_multiple_tool_call_prompt(validated_tools)
-            if allow_multiple
-            else generate_single_tool_call_prompt(validated_tools)
-        )
-
         base_messages = self._ensure_lc_messages(messages)
-        tool_call_messages = integrate_tool_call_prompt(base_messages, tool_prompt)
+        if include_tool_prompt:
+            tool_prompt = (
+                generate_multiple_tool_call_prompt(validated_tools)
+                if allow_multiple
+                else generate_single_tool_call_prompt(validated_tools)
+            )
+            tool_call_messages = integrate_tool_call_prompt(base_messages, tool_prompt)
+        else:
+            # Native function calling already sends each tool's name,
+            # description, strict input schema, and parameter descriptions.
+            # Keeping those details out of the system message lets callers
+            # maintain a byte-stable system prefix for provider prompt caches.
+            tool_call_messages = base_messages
 
         # Check if model supports native thinking - if yes, skip fake deepthink pipeline
         native_thinking_supported = self.provider_manager.does_support_thinking(model)
@@ -962,6 +974,7 @@ class UltraGPT:
         all_tools_used = reasoning_tools_used + steps_tools_used + final_details.get("tools_used", [])
 
         details_dict = {
+            "tool_prompt_included": bool(include_tool_prompt),
             "reasoning": reasoning_output,
             "steps": steps_output.get("steps", []),
             "conclusion": steps_output.get("conclusion", ""),
